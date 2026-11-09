@@ -1,0 +1,39 @@
+---
+interface Props {
+  variant?: 'full' | 'icon-only' | 'compact';
+  size?: 'sm' | 'md' | 'lg';
+}
+
+const { variant = 'full', size = 'md' } = Astro.props;
+
+const iconSizes = {
+  sm: 'w-9 h-9',
+  md: 'w-10 h-10',
+  lg: 'w-11 h-11'
+};
+
+const titleSizes = {
+  sm: 'text-base',
+  md: 'text-lg sm:text-xl',
+  lg: 'text-xl sm:text-2xl'
+};
+---
+
+<div class="inline-flex items-center gap-2.5 select-none">
+  <!-- Clean Barber Scissors Icon -->
+  <div class={`${iconSizes[size]} shrink-0 rounded-xl bg-[#141419] border border-[#D4AF37]/50 flex items-center justify-center text-[#D4AF37] shadow-sm`}>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="6" cy="6" r="3"></circle>
+      <circle cx="6" cy="18" r="3"></circle>
+      <line x1="20" y1="4" x2="8.12" y2="15.88"></line>
+      <line x1="14.47" y1="14.48" x2="20" y2="20"></line>
+      <line x1="8.12" y1="8.12" x2="12" y2="12"></line>
+    </svg>
+  </div>
+
+  {variant !== 'icon-only' && (
+    <span class={`hidden sm:inline font-serif ${titleSizes[size]} font-bold tracking-[0.14em] text-[#F4F4F6] uppercase leading-none`}>
+      BARBERÍA <span class="text-[#D4AF37]">LUCAS</span>
+    </span>
+  )}
+</div>

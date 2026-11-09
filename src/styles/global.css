@@ -1,0 +1,170 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-main: #0B0B0E;
+    --card-bg: #141419;
+    --card-hover: #1A1A22;
+    --border-color: #23232C;
+    --gold-primary: #D4AF37;
+    --gold-light: #F3E5AB;
+    --gold-glow: rgba(212, 175, 55, 0.22);
+    --text-main: #F4F4F6;
+    --text-muted: #9A9AA6;
+    --danger: #EF4444;
+    --success: #10B981;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    background-color: #0B0B0E;
+    color: #F4F4F6;
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  }
+
+  body {
+    min-height: 100vh;
+    background-color: #0B0B0E;
+    color: #F4F4F6;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, .font-serif {
+    font-family: 'Cinzel', Georgia, serif;
+    letter-spacing: 0.03em;
+  }
+
+  button, a, label, select {
+    cursor: pointer;
+  }
+}
+
+@layer components {
+  /* Botón Dorado Principal */
+  .gold-shimmer {
+    background: linear-gradient(135deg, #D4AF37 0%, #F3E5AB 50%, #C59B27 100%);
+    color: #0B0B0E;
+    font-weight: 700;
+    box-shadow: 0 6px 20px rgba(212, 175, 55, 0.25);
+    transition: all 0.2s ease;
+  }
+  .gold-shimmer:hover:not(:disabled) {
+    filter: brightness(1.07);
+    transform: translateY(-1px);
+    box-shadow: 0 10px 26px rgba(212, 175, 55, 0.35);
+  }
+
+  /* Tarjetas de Selección de Día (8 días) */
+  .date-card-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.75rem;
+    border: 1px solid #23232C;
+    background-color: #0B0B0E;
+    padding: 0.65rem 0.35rem;
+    text-align: center;
+    color: #9A9AA6;
+    transition: all 0.18s ease;
+    user-select: none;
+  }
+  .date-card-btn:hover {
+    border-color: rgba(212, 175, 55, 0.5);
+    color: #F4F4F6;
+  }
+  .date-card-btn.is-active {
+    border-color: #D4AF37;
+    background-color: rgba(212, 175, 55, 0.14);
+    color: #F4F4F6;
+    box-shadow: 0 0 18px rgba(212, 175, 55, 0.18);
+  }
+
+  /* Píldoras de Horario (1h 10m) */
+  .slot-pill-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.75rem;
+    border: 1px solid #23232C;
+    background-color: #0B0B0E;
+    padding: 0.75rem 0.5rem;
+    color: #F4F4F6;
+    transition: all 0.18s ease;
+    user-select: none;
+  }
+  .slot-pill-btn:hover:not(:disabled) {
+    border-color: rgba(212, 175, 55, 0.55);
+  }
+  .slot-pill-btn.is-active {
+    border-color: #D4AF37;
+    background-color: rgba(212, 175, 55, 0.16);
+    color: #F4F4F6;
+    box-shadow: 0 0 18px rgba(212, 175, 55, 0.2);
+  }
+  .slot-pill-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  /* Animaciones del Menú Desplegable Compacto de Apartados */
+  @keyframes navDropdownOpen {
+    0% {
+      opacity: 0;
+      transform: translateY(-8px) scale(0.97);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes navDropdownClose {
+    0% {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+    100% {
+      opacity: 0;
+      transform: translateY(-6px) scale(0.97);
+    }
+  }
+
+  .nav-dropdown-opening {
+    animation: navDropdownOpen 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    transform-origin: top center;
+  }
+
+  .nav-dropdown-closing {
+    animation: navDropdownClose 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    transform-origin: top center;
+    pointer-events: none;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0B0B0E;
+}
+::-webkit-scrollbar-thumb {
+  background: #23232C;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #D4AF37;
+}

@@ -1,0 +1,2012 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import BrandLogo from '../brand/BrandLogo.astro';
+import { supabaseAdmin } from '../../lib/supabaseServer';
+import { getLimaDateTime } from '../../lib/rateLimit';
+
+interface Props {
+  user: any;
+  rol: string;
+  nombreVisible: string;
+}
+
+const { user } = Astro.props;
+const ownerId = user?.id;
+const { todayLima } = getLimaDateTime();
+
+// Fechas de rango para el mes en curso (Lima)
+const [anioActual, mesNum, diaDelMes] = todayLima.split('-').map(Number);
+const mesActual = mesNum - 1;
+const inicioMesStr = `${anioActual}-${String(mesActual + 1).padStart(2, '0')}-01`;
+const ultimoDiaMes = new Date(Date.UTC(anioActual, mesActual + 1, 0)).getUTCDate();
+const finMesStr = `${anioActual}-${String(mesActual + 1).padStart(2, '0')}-${String(ultimoDiaMes).padStart(2, '0')}`;
+
+let allBarberos: any[] = [];
+let allServicios: any[] = [];
+let allCitas: any[] = [];
+let allBloqueos: any[] = [];
+let cierresHistoricos: any[] = [];
+let historialGeneralClientes: any[] = [];
+let configBarberia: any = {
+  whatsapp_soporte: '51999999999',
+  bloques_lv: ['16:30', '17:40', '18:50', '20:00', '21:10'],
+  bloques_sd: ['15:00', '16:10', '17:20', '19:00'],
+  max_dias_reserva: 8,
+};
+
+try {
+  const [barberosRes, serviciosRes, citasRes, bloqueosRes, cierresRes, cfgRes, histRes] = await Promise.all([
+    supabaseAdmin
+      .from('perfiles_staff')
+      .select('id, nombre_visible, rol, activo, atiende_cortes')
+      .in('rol', ['barber', 'owner'])
+      .eq('activo', true)
+      .order('rol', { ascending: false })
+      .order('nombre_visible', { ascending: true }),
+    supabaseAdmin
+      .from('servicios')
+      .select('id, nombre, precio, descripcion, activo')
+      .eq('activo', true)
+      .order('id', { ascending: true }),
+    supabaseAdmin
+      .from('citas')
+      .select('id, barbero_id, dni, nombre_completo, telefono, servicio_id, precio_pactado, fecha, bloque_horario, estado, metodo_pago, created_at, servicios (nombre), perfiles_staff:barbero_id (nombre_visible)')
+      .gte('fecha', inicioMesStr)
+      .order('fecha', { ascending: true })
+      .order('bloque_horario', { ascending: true }),
+    supabaseAdmin
+      .from('bloqueos_agenda')
+      .select('id, barbero_id, fecha, bloque_horario, motivo, created_at, perfiles_staff:barbero_id (nombre_visible)')
+      .gte('fecha', todayLima)
+      .order('fecha', { ascending: true }),
+    supabaseAdmin
+      .from('cierres_mensuales')
+      .select('*')
+      .order('mes_anio', { ascending: false }),
+    supabaseAdmin
+      .from('configuracion_barberia')
+      .select('*')
+      .eq('id', 1)
+      .maybeSingle(),
+    supabaseAdmin
+      .from('historial_clientes')
+      .select('*')
+      .order('ultima_fecha', { ascending: false }),
+  ]);
+
+  allBarberos = barberosRes.data || [];
+  allServicios = serviciosRes.data || [];
+  allCitas = citasRes.data || [];
+  allBloqueos = bloqueosRes.data || [];
+  cierresHistoricos = cierresRes.data || [];
+  historialGeneralClientes = histRes.data || [];
+  if (cfgRes.data) configBarberia = { ...configBarberia, ...cfgRes.data };
+} catch (e) {
+  console.error('Error cargando datos del panel gerencial:', e);
+}
+
+// Combinar historial_clientes con citas actuales en caso de que falte alguno
+if (historialGeneralClientes.length === 0 && allCitas.length > 0) {
+  const mapC = new Map<string, any>();
+  for (const c of allCitas) {
+    const prev = mapC.get(c.dni) || {
+      dni: c.dni,
+      nombre_completo: c.nombre_completo,
+      telefono: c.telefono,
+      total_agendadas: 0,
+      total_asistidas: 0,
+      total_canceladas: 0,
+      ultima_fecha: c.fecha,
+    };
+    prev.nombre_completo = c.nombre_completo;
+    prev.telefono = c.telefono;
+    prev.total_agendadas += 1;
+    if (c.estado === 'completada') prev.total_asistidas += 1;
+    if (c.estado === 'cancelada' || c.estado === 'no_asistio') prev.total_canceladas += 1;
+    if (c.fecha > prev.ultima_fecha) prev.ultima_fecha = c.fecha;
+    mapC.set(c.dni, prev);
+  }
+  historialGeneralClientes = Array.from(mapC.values());
+}
+
+const whatsappSoporte = configBarberia.whatsapp_soporte || '51999999999';
+
+// 1. KPIs Financieros en Vivo (Solo Efectivo y Yape / Plin)
+const citasCompletadasMes = allCitas.filter(
+  (c) => c.fecha >= inicioMesStr && c.fecha <= finMesStr && c.estado === 'completada'
+);
+
+const ingresosTotalesMes = citasCompletadasMes.reduce(
+  (acc, c) => acc + Number(c.precio_pactado || 0),
+  0
+);
+
+const semanasTranscurridas = Math.max(1, Math.ceil(diaDelMes / 7));
+const promedioSemanal = (ingresosTotalesMes / semanasTranscurridas).toFixed(2);
+
+const totalCerradas = allCitas.filter((c) =>
+  ['completada', 'cancelada', 'no_asistio'].includes(c.estado)
+).length;
+const tasaFiabilidad =
+  totalCerradas > 0
+    ? ((citasCompletadasMes.length / totalCerradas) * 100).toFixed(1)
+    : '100.0';
+
+const totalEfectivo = citasCompletadasMes
+  .filter((c) => (c.metodo_pago || 'efectivo') === 'efectivo')
+  .reduce((acc, c) => acc + Number(c.precio_pactado || 0), 0);
+const totalYapePlin = citasCompletadasMes
+  .filter((c) => c.metodo_pago === 'yape_plin')
+  .reduce((acc, c) => acc + Number(c.precio_pactado || 0), 0);
+
+// 2. Rendimiento por Trabajador (Barberos + Gerencia)
+const rendimientoBarberos = allBarberos.map((barbero) => {
+  const citasBarbero = allCitas.filter((c) => c.barbero_id === barbero.id);
+  const completadas = citasBarbero.filter((c) => c.estado === 'completada');
+  const canceladasOFaltas = citasBarbero.filter((c) =>
+    ['cancelada', 'no_asistio'].includes(c.estado)
+  );
+  const pendientesHoy = citasBarbero.filter((c) =>
+    ['pendiente', 'aceptada'].includes(c.estado)
+  );
+  const recaudado = completadas.reduce((sum, c) => sum + Number(c.precio_pactado || 0), 0);
+
+  return {
+    id: barbero.id,
+    nombre: barbero.nombre_visible,
+    rol: barbero.rol,
+    esGerente: barbero.id === ownerId || barbero.rol === 'owner',
+    cortesCompletados: completadas.length,
+    enAgenda: pendientesHoy.length,
+    cancelaciones: canceladasOFaltas.length,
+    totalGenerado: recaudado,
+  };
+});
+
+// 3. Generar los 8 días de rango (Hoy + 7 días) anclados a Lima
+const diasNombres = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+const mesesNombres = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+
+const dias8Rango = Array.from({ length: 8 }, (_, i) => {
+  const d = new Date(`${todayLima}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + i);
+  const iso = d.toISOString().split('T')[0];
+  const dow = d.getUTCDay();
+  const esFinDeSemana = dow === 0 || dow === 6;
+  const bloquesDia: string[] = esFinDeSemana
+    ? (configBarberia.bloques_sd || ['15:00', '16:10', '17:20', '19:00'])
+    : (configBarberia.bloques_lv || ['16:30', '17:40', '18:50', '20:00', '21:10']);
+  return {
+    iso,
+    etiqueta: i === 0 ? 'HOY' : i === 1 ? 'MAÑ' : diasNombres[dow].toUpperCase(),
+    diaSemana: diasNombres[dow],
+    numero: String(d.getUTCDate()).padStart(2, '0'),
+    mes: mesesNombres[d.getUTCMonth()],
+    esFinDeSemana,
+    bloquesDia,
+  };
+});
+
+function formatHora12(hhmm: string) {
+  if (!hhmm || !hhmm.includes(':')) return hhmm;
+  const [hStr, mStr] = hhmm.split(':');
+  const h = parseInt(hStr, 10);
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 || 12;
+  return `${h12}:${mStr} ${suffix}`;
+}
+
+const linkWhatsappSoporte = `https://wa.me/${whatsappSoporte}?text=${encodeURIComponent(
+  'Hola Soporte de Barbería Lucas, soy Gerencia y necesito apoyo con:'
+)}`;
+---
+
+<Layout title="Gerencia | Barbería Lucas">
+  <div class="min-h-screen bg-[#0B0B0E] text-[#F4F4F6] pb-20">
+    <!-- HEADER COMPACTO CON MENÚ DESPLEGABLE DE APARTADOS -->
+    <header class="sticky top-0 z-30 border-b border-[#23232C] bg-[#0B0B0E]/95 backdrop-blur-xl">
+      <div class="mx-auto flex max-w-7xl items-center justify-between gap-2 px-3.5 py-2.5 sm:px-6">
+        <div class="flex items-center gap-2">
+          <BrandLogo size="sm" variant="compact" />
+          <span class="rounded-md border border-[#D4AF37]/40 bg-[#D4AF37]/15 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+            Gerencia
+          </span>
+        </div>
+
+        <div class="flex items-center gap-1.5 sm:gap-2">
+          <button
+            type="button"
+            id="open-owner-manual-book-btn"
+            class="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-[#D4AF37] px-3 py-1.5 text-xs font-bold text-[#0B0B0E] shadow-md active:scale-95"
+          >
+            <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            <span>Agendar Cita</span>
+          </button>
+
+          <a
+            href={linkWhatsappSoporte}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex min-h-[38px] items-center gap-1 rounded-xl border border-[#D4AF37]/40 bg-[#D4AF37]/10 px-2.5 py-1.5 text-xs font-bold text-[#D4AF37] active:scale-95"
+          >
+            <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+            </svg>
+            <span class="hidden sm:inline">Soporte</span>
+          </a>
+
+          <button
+            type="button"
+            id="owner-logout-btn"
+            class="min-h-[38px] rounded-xl border border-[#23232C] bg-[#141419] px-3 py-1.5 text-xs font-semibold text-[#9A9AA6] hover:text-[#EF4444] active:scale-95"
+          >
+            Salir
+          </button>
+        </div>
+      </div>
+
+      <!-- SELECTOR DESPLEGABLE DE APARTADOS (OCUPA 1 SOLA LÍNEA COMPACTA) -->
+      <div class="mx-auto max-w-7xl px-3.5 pb-2.5 sm:px-6">
+        <div class="relative" id="owner-nav-dropdown-wrapper">
+          <button
+            type="button"
+            id="owner-nav-dropdown-trigger"
+            aria-expanded="false"
+            class="flex min-h-[42px] w-full items-center justify-between gap-2 rounded-xl border border-[#D4AF37]/40 bg-[#141419] px-3.5 py-2 text-left text-xs font-bold text-[#F4F4F6] shadow-md transition-all hover:border-[#D4AF37]"
+          >
+            <span class="flex items-center gap-2">
+              <span class="flex h-6 w-6 items-center justify-center rounded-lg bg-[#D4AF37]/15 text-[#D4AF37]">
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                  <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+                </svg>
+              </span>
+              <span class="text-[10px] font-semibold uppercase tracking-wider text-[#9A9AA6]">Apartado:</span>
+              <span id="owner-nav-current-label" class="text-xs font-bold text-[#D4AF37]">Calendario Día</span>
+            </span>
+
+            <span class="flex items-center gap-1.5 text-[11px] font-semibold text-[#9A9AA6]">
+              <span>Cambiar</span>
+              <svg id="owner-nav-chevron" class="h-4 w-4 text-[#D4AF37] transition-transform duration-200" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </span>
+          </button>
+
+          <!-- MENÚ DESPLEGABLE FLOTANTE -->
+          <div
+            id="owner-nav-dropdown-menu"
+            class="absolute left-0 right-0 top-full z-40 mt-1.5 hidden rounded-2xl border border-[#D4AF37]/40 bg-[#141419] p-1.5 shadow-2xl"
+          >
+            <button
+              type="button"
+              data-spa-target="panel-calendario"
+              data-spa-label="Calendario Día"
+              class="spa-tab-btn flex min-h-[42px] w-full items-center justify-between rounded-xl bg-[#D4AF37] px-3.5 py-2 text-xs font-bold text-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+                </svg>
+                <span>Calendario de Cortes por Día</span>
+              </span>
+              <span class="font-mono text-[10px] uppercase">8 Días</span>
+            </button>
+
+            <button
+              type="button"
+              data-spa-target="panel-agenda"
+              data-spa-label={`Citas (${allCitas.length})`}
+              class="spa-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+                </svg>
+                <span>Cuadrícula de Citas</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E] px-2 py-0.5 font-mono text-[11px] text-[#D4AF37]">{allCitas.length}</span>
+            </button>
+
+            <button
+              type="button"
+              data-spa-target="panel-clientes"
+              data-spa-label={`Clientes (${historialGeneralClientes.length})`}
+              class="spa-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+                <span>Historial de Clientes</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E] px-2 py-0.5 font-mono text-[11px] text-[#D4AF37]">{historialGeneralClientes.length}</span>
+            </button>
+
+            <button
+              type="button"
+              data-spa-target="panel-bloqueos"
+              data-spa-label={`Descansos (${allBloqueos.length})`}
+              class="spa-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+                </svg>
+                <span>Bloquear Día y Descansos</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E] px-2 py-0.5 font-mono text-[11px] text-[#D4AF37]">{allBloqueos.length}</span>
+            </button>
+
+            <button
+              type="button"
+              data-spa-target="panel-resumen"
+              data-spa-label="Finanzas y Rendimiento"
+              class="spa-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 20V10M18 20V4M6 20v-4"/>
+                </svg>
+                <span>Finanzas y Rendimiento</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E] px-2 py-0.5 font-mono text-[11px] text-[#10B981]">S/ {ingresosTotalesMes.toFixed(0)}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-7xl px-3.5 py-5 sm:px-6">
+
+      <!-- =================================================================== -->
+      <!-- PANEL 1: CALENDARIO DE CORTES POR DÍA (GENERAL Y POR TRABAJADOR)    -->
+      <!-- =================================================================== -->
+      <section id="panel-calendario" class="spa-panel space-y-5">
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+          <div class="mb-4">
+            <h2 class="font-serif text-lg font-bold text-[#F4F4F6] sm:text-xl">Calendario de Cortes por Día</h2>
+            <p class="text-xs text-[#9A9AA6]">
+              Toca cualquier día y filtra entre la vista general o cada trabajador para ver y gestionar sus turnos.
+            </p>
+          </div>
+
+          <!-- PASO A: SELECTOR TÁCTIL DE LOS 8 DÍAS -->
+          <div class="mb-5">
+            <span class="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+              1. Selecciona el Día
+            </span>
+            <div class="grid grid-cols-4 gap-2 sm:grid-cols-8">
+              {dias8Rango.map((d, idx) => (
+                <button
+                  type="button"
+                  data-cal-date={d.iso}
+                  class={`cal-day-btn flex flex-col items-center justify-center rounded-xl border py-2.5 px-1 text-center transition-all active:scale-95 ${
+                    idx === 0
+                      ? 'border-[#D4AF37] bg-[#D4AF37]/15 text-[#F4F4F6] shadow-[0_0_15px_rgba(212,175,55,0.18)]'
+                      : 'border-[#23232C] bg-[#0B0B0E] text-[#9A9AA6]'
+                  }`}
+                >
+                  <span class="text-[9px] font-bold uppercase">{d.etiqueta}</span>
+                  <span class="mt-0.5 font-mono text-base font-bold text-[#F4F4F6]">{d.numero}</span>
+                  <span class="text-[10px]">{d.mes}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <!-- PASO B: SELECTOR TÁCTIL DE TRABAJADOR (GENERAL O POR BARBERO) -->
+          <div class="mb-5">
+            <span class="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+              2. Ver Agenda de:
+            </span>
+            <div class="flex flex-wrap gap-2">
+              <button
+                type="button"
+                data-cal-worker="TODOS"
+                class="cal-worker-btn min-h-[42px] rounded-xl bg-[#D4AF37] px-4 py-2 text-xs font-bold text-[#0B0B0E] shadow-sm transition-all"
+              >
+                General (Todos)
+              </button>
+              {allBarberos.map((b) => (
+                <button
+                  type="button"
+                  data-cal-worker={b.id}
+                  class="cal-worker-btn min-h-[42px] rounded-xl border border-[#23232C] bg-[#0B0B0E] px-4 py-2 text-xs font-bold text-[#F4F4F6] transition-all hover:border-[#D4AF37]/50"
+                >
+                  {b.id === ownerId || b.rol === 'owner' ? `${b.nombre_visible} (Mi Sillón)` : b.nombre_visible}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <!-- MATRIZ VISUAL DE TURNOS POR DÍA Y POR TRABAJADOR -->
+          {dias8Rango.map((d, dIdx) => (
+            <div
+              data-cal-day-panel={d.iso}
+              class={`cal-day-panel space-y-6 ${dIdx === 0 ? '' : 'hidden'}`}
+            >
+              {allBarberos.map((barbero) => {
+                const diaCerradoCompleto = allBloqueos.some(
+                  (bl) => bl.barbero_id === barbero.id && bl.fecha === d.iso && bl.bloque_horario === 'TODOS'
+                );
+
+                return (
+                  <div
+                    data-cal-worker-section={barbero.id}
+                    class="cal-worker-section rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-4 sm:p-5"
+                  >
+                    <div class="mb-3.5 flex flex-wrap items-center justify-between gap-2 border-b border-[#23232C] pb-3">
+                      <div class="flex items-center gap-2.5">
+                        <div class="flex h-9 w-9 items-center justify-center rounded-full border border-[#D4AF37]/50 bg-[#141419] font-serif text-xs font-bold text-[#D4AF37]">
+                          {barbero.nombre_visible.slice(0, 2).toUpperCase()}
+                        </div>
+                        <div>
+                          <h3 class="font-serif text-sm font-bold text-[#F4F4F6] sm:text-base">
+                            {barbero.nombre_visible}
+                            {(barbero.id === ownerId || barbero.rol === 'owner') && (
+                              <span class="ml-1.5 rounded bg-[#D4AF37]/15 px-2 py-0.5 font-sans text-[10px] font-bold text-[#D4AF37]">
+                                Gerencia
+                              </span>
+                            )}
+                          </h3>
+                          <p class="font-mono text-[11px] text-[#9A9AA6]">
+                            {d.diaSemana} {d.numero} {d.mes} ({d.iso})
+                          </p>
+                        </div>
+                      </div>
+
+                      {diaCerradoCompleto && (
+                        <span class="rounded-lg border border-[#EF4444]/40 bg-[#EF4444]/15 px-3 py-1 text-xs font-bold text-[#EF4444]">
+                          Día Completo Bloqueado
+                        </span>
+                      )}
+                    </div>
+
+                    <!-- Cuadrícula de Horas del Día para este Trabajador -->
+                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      {d.bloquesDia.map((hora) => {
+                        const citaSlot = allCitas.find(
+                          (c) =>
+                            c.barbero_id === barbero.id &&
+                            c.fecha === d.iso &&
+                            c.bloque_horario === hora &&
+                            ['pendiente', 'aceptada', 'completada'].includes(c.estado)
+                        );
+                        const bloqueoSlot = allBloqueos.find(
+                          (bl) =>
+                            bl.barbero_id === barbero.id &&
+                            bl.fecha === d.iso &&
+                            (bl.bloque_horario === hora || bl.bloque_horario === 'TODOS')
+                        );
+
+                        if (citaSlot) {
+                          const telClean = String(citaSlot.telefono || '').replace(/\D/g, '');
+                          const waUrl = `https://wa.me/${telClean.startsWith('51') ? telClean : '51' + telClean}?text=${encodeURIComponent(`Hola ${citaSlot.nombre_completo}, te escribimos de Barbería Lucas sobre tu turno de las ${formatHora12(hora)} (${d.iso}).`)}`;
+                          const primerNombre = String(citaSlot.nombre_completo || 'amigo').trim().split(' ')[0];
+                          const msg30m = `¡Qué tal ${primerNombre}! Habla ${nombreVisible} de Barbería Lucas mano. Te paso la voz que en una media hora te toca tu turno (${formatHora12(hora)}). Ya te tengo la silla lista, avísame si ya estás en camino!`;
+                          const waAviso30mUrl = `https://wa.me/${telClean.startsWith('51') ? telClean : '51' + telClean}?text=${encodeURIComponent(msg30m)}`;
+                          const pagoTag = citaSlot.metodo_pago === 'yape_plin' ? 'Yape / Plin' : 'Efectivo';
+
+                          return (
+                            <div class="flex flex-col justify-between rounded-xl border border-[#D4AF37]/50 bg-[#141419] p-3.5 shadow-md">
+                              <div>
+                                <div class="flex items-center justify-between gap-2">
+                                  <span class="font-mono text-sm font-bold text-[#D4AF37]">
+                                    {formatHora12(hora)}
+                                  </span>
+                                  <span class={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase ${
+                                    citaSlot.estado === 'completada'
+                                      ? 'bg-[#10B981]/20 text-[#10B981]'
+                                      : citaSlot.estado === 'aceptada'
+                                      ? 'bg-[#D4AF37]/20 text-[#D4AF37]'
+                                      : 'bg-[#F59E0B]/20 text-[#F59E0B]'
+                                  }`}>
+                                    {citaSlot.estado}
+                                  </span>
+                                </div>
+
+                                <p class="mt-2 font-serif text-sm font-bold text-[#F4F4F6]">
+                                  {citaSlot.nombre_completo}
+                                </p>
+                                <p class="font-mono text-[11px] text-[#9A9AA6]">
+                                  DNI: {citaSlot.dni} • Cel: {citaSlot.telefono}
+                                </p>
+                                <p class="mt-1 text-xs font-semibold text-[#D4AF37]">
+                                  {citaSlot.servicios?.nombre || 'Corte'} • S/ {Number(citaSlot.precio_pactado).toFixed(2)} ({pagoTag})
+                                </p>
+                              </div>
+
+                              <!-- Botones Táctiles Directos en el Calendario -->
+                              <div class="mt-3 grid grid-cols-2 gap-1.5 border-t border-[#23232C] pt-2.5">
+                                {citaSlot.estado === 'pendiente' && (
+                                  <button
+                                    type="button"
+                                    class="owner-status-btn col-span-2 inline-flex min-h-[38px] items-center justify-center gap-1.5 rounded-lg bg-[#D4AF37] px-3 py-2 text-xs font-bold text-[#0B0B0E] active:scale-95"
+                                    data-cita-id={citaSlot.id}
+                                    data-estado="aceptada"
+                                  >
+                                    <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                                    <span>Aprobar Turno</span>
+                                  </button>
+                                )}
+                                {['pendiente', 'aceptada'].includes(citaSlot.estado) && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      class="owner-status-btn inline-flex min-h-[38px] items-center justify-center gap-1 rounded-lg bg-[#10B981] px-2.5 py-2 text-xs font-bold text-[#0B0B0E] active:scale-95"
+                                      data-cita-id={citaSlot.id}
+                                      data-estado="completada"
+                                    >
+                                      <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                                      <span>Completar</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      class="open-reassign-btn inline-flex min-h-[38px] items-center justify-center gap-1 rounded-lg border border-[#D4AF37]/40 bg-[#D4AF37]/10 px-2.5 py-2 text-xs font-bold text-[#D4AF37] active:scale-95"
+                                      data-cita-id={citaSlot.id}
+                                      data-barbero-id={citaSlot.barbero_id}
+                                      data-fecha={citaSlot.fecha}
+                                      data-bloque={citaSlot.bloque_horario}
+                                      data-cliente={citaSlot.nombre_completo}
+                                    >
+                                      <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                      <span>Reprogramar</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      class="owner-status-btn inline-flex min-h-[38px] items-center justify-center gap-1 rounded-lg border border-[#EF4444]/40 bg-[#EF4444]/10 px-2.5 py-2 text-xs font-bold text-[#EF4444] active:scale-95"
+                                      data-cita-id={citaSlot.id}
+                                      data-estado="cancelada"
+                                    >
+                                      <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                      <span>Rechazar</span>
+                                    </button>
+                                  </>
+                                )}
+                                {d.iso === todayLima && ['pendiente', 'aceptada'].includes(citaSlot.estado) && (
+                                  <a
+                                    href={waAviso30mUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    class="col-span-2 flex min-h-[36px] items-center justify-center gap-1.5 rounded-lg border border-[#D4AF37]/50 bg-[#D4AF37]/10 px-2 py-1.5 text-xs font-bold text-[#D4AF37] hover:bg-[#D4AF37]/20 active:scale-95 transition-all"
+                                    title="Avisar al cliente que en 30 minutos le toca su turno"
+                                  >
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                    <span>Avisar turno (en 30m)</span>
+                                  </a>
+                                )}
+                                <a
+                                  href={waUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  class="flex min-h-[38px] items-center justify-center rounded-lg border border-[#10B981]/40 bg-[#10B981]/10 px-2.5 py-2 text-xs font-bold text-[#10B981]"
+                                >
+                                  WhatsApp
+                                </a>
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        if (bloqueoSlot) {
+                          return (
+                            <div class="flex flex-col justify-between rounded-xl border border-[#F59E0B]/30 bg-[#141419]/60 p-3.5">
+                              <div>
+                                <div class="flex items-center justify-between">
+                                  <span class="font-mono text-sm font-bold text-[#9A9AA6] line-through">
+                                    {formatHora12(hora)}
+                                  </span>
+                                  <span class="rounded-md bg-[#F59E0B]/15 px-2 py-0.5 text-[10px] font-bold uppercase text-[#F59E0B]">
+                                    Bloqueado
+                                  </span>
+                                </div>
+                                <p class="mt-2 text-xs text-[#9A9AA6]">
+                                  {bloqueoSlot.motivo || 'Descanso programado'}
+                                </p>
+                              </div>
+                              <a
+                                href={`https://wa.me/${whatsappSoporte}?text=${encodeURIComponent(`Hola Soporte, solicito desbloquear el turno de ${barbero.nombre_visible} del ${d.iso} (${hora}).`)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                class="mt-3 flex min-h-[36px] items-center justify-center rounded-lg border border-[#23232C] bg-[#0B0B0E] text-[11px] font-semibold text-[#D4AF37]"
+                              >
+                                Pedir Desbloqueo a Soporte
+                              </a>
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <div class="flex flex-col justify-between rounded-xl border border-[#23232C] bg-[#141419]/40 p-3.5">
+                            <div class="flex items-center justify-between">
+                              <span class="font-mono text-sm font-bold text-[#F4F4F6]">
+                                {formatHora12(hora)}
+                              </span>
+                              <span class="rounded-md bg-[#10B981]/15 px-2 py-0.5 text-[10px] font-bold uppercase text-[#10B981]">
+                                Disponible
+                              </span>
+                            </div>
+                            <p class="my-2 text-xs text-[#9A9AA6]">Turno libre para reserva</p>
+                            <button
+                              type="button"
+                              class="quick-block-slot-btn min-h-[36px] rounded-lg border border-[#23232C] bg-[#0B0B0E] px-3 py-1.5 text-[11px] font-semibold text-[#9A9AA6] hover:border-[#D4AF37] hover:text-[#D4AF37] active:scale-95"
+                              data-barbero-id={barbero.id}
+                              data-fecha={d.iso}
+                              data-bloque={hora}
+                            >
+                              Bloquear este turno
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 2: CUADRÍCULA DE CITAS CON BOTONES TÁCTILES                   -->
+      <!-- =================================================================== -->
+      <section id="panel-agenda" class="spa-panel hidden space-y-5">
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+          <div class="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+            <div>
+              <h2 class="font-serif text-lg font-bold text-[#F4F4F6] sm:text-xl">Cuadrícula de Citas</h2>
+              <p class="text-xs text-[#9A9AA6]">Aprueba, completa, reprograma o rechaza turnos con un solo toque.</p>
+            </div>
+
+            <!-- Filtros Táctiles -->
+            <div class="flex flex-wrap gap-1.5">
+              <button type="button" class="owner-filter-btn min-h-[38px] rounded-xl bg-[#D4AF37] px-3.5 py-1.5 text-xs font-bold text-[#0B0B0E]" data-estado="todos">
+                Todas ({allCitas.length})
+              </button>
+              <button type="button" class="owner-filter-btn min-h-[38px] rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-1.5 text-xs font-semibold text-[#9A9AA6]" data-estado="pendiente">
+                Pendientes
+              </button>
+              <button type="button" class="owner-filter-btn min-h-[38px] rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-1.5 text-xs font-semibold text-[#9A9AA6]" data-estado="aceptada">
+                Aprobadas
+              </button>
+              <button type="button" class="owner-filter-btn min-h-[38px] rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-1.5 text-xs font-semibold text-[#9A9AA6]" data-estado="completada">
+                Completadas
+              </button>
+            </div>
+          </div>
+
+          {allCitas.length === 0 ? (
+            <div class="rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-10 text-center text-sm text-[#9A9AA6]">
+              No hay citas registradas en este momento.
+            </div>
+          ) : (
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {allCitas.map((cita) => {
+                const waClean = String(cita.telefono || '').replace(/\D/g, '');
+                const waClientUrl = `https://wa.me/${waClean.startsWith('51') ? waClean : '51' + waClean}?text=${encodeURIComponent(`Hola ${cita.nombre_completo}, te escribimos de Barbería Lucas sobre tu turno del ${cita.fecha} a las ${formatHora12(cita.bloque_horario)}.`)}`;
+                const pagoTag = cita.metodo_pago === 'yape_plin' ? 'Yape / Plin' : 'Efectivo';
+
+                return (
+                  <article
+                    class="owner-cita-card flex flex-col justify-between rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-4 shadow-lg transition-all hover:border-[#D4AF37]/40"
+                    data-estado={cita.estado}
+                  >
+                    <div>
+                      <!-- Cabecera del Cuadrado -->
+                      <div class="flex items-center justify-between gap-2 border-b border-[#23232C] pb-3">
+                        <div>
+                          <span class="block font-mono text-xs font-bold text-[#D4AF37]">
+                            {cita.fecha} • {formatHora12(cita.bloque_horario)}
+                          </span>
+                          <span class="text-[11px] font-semibold text-[#9A9AA6]">
+                            Barbero: <strong class="text-[#F4F4F6]">{cita.perfiles_staff?.nombre_visible || 'Barbero'}</strong>
+                          </span>
+                        </div>
+
+                        <span class={`rounded-lg px-2.5 py-1 text-[10px] font-bold uppercase ${
+                          cita.estado === 'completada'
+                            ? 'bg-[#10B981]/20 text-[#10B981]'
+                            : cita.estado === 'aceptada'
+                            ? 'bg-[#D4AF37]/20 text-[#D4AF37]'
+                            : cita.estado === 'pendiente'
+                            ? 'bg-[#F59E0B]/20 text-[#F59E0B]'
+                            : 'bg-[#EF4444]/20 text-[#EF4444]'
+                        }`}>
+                          {cita.estado === 'no_asistio' ? 'No Asistió' : cita.estado}
+                        </span>
+                      </div>
+
+                      <!-- Datos del Cliente y Servicio -->
+                      <div class="my-3.5 space-y-1.5">
+                        <h3 class="font-serif text-base font-bold text-[#F4F4F6]">
+                          {cita.nombre_completo}
+                        </h3>
+                        <p class="font-mono text-xs text-[#9A9AA6]">
+                          DNI: {cita.dni} • Cel: {cita.telefono}
+                        </p>
+                        <div class="mt-2 flex items-center justify-between rounded-xl border border-[#23232C] bg-[#141419] px-3 py-2 text-xs">
+                          <span class="font-semibold text-[#F4F4F6]">{cita.servicios?.nombre || 'Corte'}</span>
+                          <span class="font-mono font-bold text-[#D4AF37]">
+                            S/ {Number(cita.precio_pactado).toFixed(2)} ({pagoTag})
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- BOTONES GRANDES DE ACCIÓN -->
+                    <div class="space-y-2 border-t border-[#23232C] pt-3">
+                      <div class="grid grid-cols-2 gap-2">
+                        {cita.estado !== 'aceptada' && cita.estado !== 'completada' && (
+                          <button
+                            type="button"
+                            class="owner-status-btn inline-flex min-h-[42px] items-center justify-center gap-1.5 rounded-xl bg-[#D4AF37] px-3 py-2 text-xs font-bold text-[#0B0B0E] active:scale-95"
+                            data-cita-id={cita.id}
+                            data-estado="aceptada"
+                          >
+                            <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                            <span>Aprobar</span>
+                          </button>
+                        )}
+                        {cita.estado !== 'completada' && (
+                          <button
+                            type="button"
+                            class="owner-status-btn inline-flex min-h-[42px] items-center justify-center gap-1.5 rounded-xl bg-[#10B981] px-3 py-2 text-xs font-bold text-[#0B0B0E] active:scale-95"
+                            data-cita-id={cita.id}
+                            data-estado="completada"
+                          >
+                            <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                            <span>Completar</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          class="open-reassign-btn inline-flex min-h-[42px] items-center justify-center gap-1.5 rounded-xl border border-[#D4AF37]/40 bg-[#D4AF37]/10 px-3 py-2 text-xs font-bold text-[#D4AF37] active:scale-95"
+                          data-cita-id={cita.id}
+                          data-barbero-id={cita.barbero_id}
+                          data-fecha={cita.fecha}
+                          data-bloque={cita.bloque_horario}
+                          data-cliente={cita.nombre_completo}
+                        >
+                          <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                          <span>Reprogramar</span>
+                        </button>
+                        {cita.estado !== 'cancelada' && (
+                          <button
+                            type="button"
+                            class="owner-status-btn inline-flex min-h-[42px] items-center justify-center gap-1.5 rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3 py-2 text-xs font-bold text-[#EF4444] active:scale-95"
+                            data-cita-id={cita.id}
+                            data-estado="cancelada"
+                          >
+                            <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            <span>Rechazar</span>
+                          </button>
+                        )}
+                      </div>
+
+                      <div class="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          class="owner-status-btn min-h-[38px] rounded-xl border border-[#23232C] bg-[#141419] px-3 py-1.5 text-[11px] font-semibold text-[#9A9AA6] hover:text-[#F4F4F6]"
+                          data-cita-id={cita.id}
+                          data-estado="no_asistio"
+                        >
+                          Marcar No Asistió
+                        </button>
+                        <a
+                          href={waClientUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="flex min-h-[38px] items-center justify-center rounded-xl border border-[#10B981]/40 bg-[#10B981]/10 px-3 py-1.5 text-xs font-bold text-[#10B981]"
+                        >
+                          WhatsApp Cliente
+                        </a>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 3: HISTORIAL Y SEGUIMIENTO DE CLIENTES (PERMANENTE)           -->
+      <!-- =================================================================== -->
+      <section id="panel-clientes" class="spa-panel hidden space-y-5">
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+          <div class="mb-5">
+            <h2 class="font-serif text-lg font-bold text-[#F4F4F6] sm:text-xl">Historial General de Clientes</h2>
+            <p class="text-xs text-[#9A9AA6]">
+              Seguimiento permanente de todos los clientes: cuántas veces agendaron cita, cuántas asistieron y cuántas cancelaron. Este historial se conserva incluso después del cierre mensual.
+            </p>
+          </div>
+
+          {historialGeneralClientes.length === 0 ? (
+            <div class="rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-10 text-center text-sm text-[#9A9AA6]">
+              Aún no hay clientes registrados en el historial.
+            </div>
+          ) : (
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {historialGeneralClientes.map((cl) => {
+                const telClean = String(cl.telefono || '').replace(/\D/g, '');
+                const waUrl = `https://wa.me/${telClean.startsWith('51') ? telClean : '51' + telClean}?text=${encodeURIComponent(`Hola ${cl.nombre_completo}, te saludamos de Barbería Lucas.`)}`;
+
+                return (
+                  <div class="flex flex-col justify-between rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-4 shadow-md">
+                    <div>
+                      <div class="flex items-start justify-between gap-2 border-b border-[#23232C] pb-3">
+                        <div>
+                          <h3 class="font-serif text-base font-bold text-[#F4F4F6]">
+                            {cl.nombre_completo}
+                          </h3>
+                          <p class="font-mono text-xs text-[#9A9AA6]">
+                            DNI: {cl.dni} • Cel: {cl.telefono}
+                          </p>
+                        </div>
+                        <span class="rounded-lg bg-[#D4AF37]/15 px-2.5 py-1 font-mono text-[10px] font-bold text-[#D4AF37]">
+                          Última: {cl.ultima_fecha}
+                        </span>
+                      </div>
+
+                      <div class="my-3.5 grid grid-cols-3 gap-2 text-center">
+                        <div class="rounded-xl border border-[#23232C] bg-[#141419] p-2.5">
+                          <span class="block font-mono text-lg font-bold text-[#D4AF37]">
+                            {cl.total_agendadas}
+                          </span>
+                          <span class="text-[10px] font-semibold uppercase text-[#9A9AA6]">
+                            Agendadas
+                          </span>
+                        </div>
+                        <div class="rounded-xl border border-[#10B981]/30 bg-[#10B981]/10 p-2.5">
+                          <span class="block font-mono text-lg font-bold text-[#10B981]">
+                            {cl.total_asistidas}
+                          </span>
+                          <span class="text-[10px] font-semibold uppercase text-[#10B981]">
+                            Asistieron
+                          </span>
+                        </div>
+                        <div class="rounded-xl border border-[#EF4444]/30 bg-[#EF4444]/10 p-2.5">
+                          <span class="block font-mono text-lg font-bold text-[#EF4444]">
+                            {cl.total_canceladas}
+                          </span>
+                          <span class="text-[10px] font-semibold uppercase text-[#EF4444]">
+                            Cancelaron
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <a
+                      href={waUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="flex min-h-[40px] w-full items-center justify-center rounded-xl border border-[#10B981]/40 bg-[#10B981]/10 px-3 py-2 text-xs font-bold text-[#10B981]"
+                    >
+                      Contactar por WhatsApp
+                    </a>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 4: BLOQUEAR DÍA Y DESCANSOS                                   -->
+      <!-- =================================================================== -->
+      <section id="panel-bloqueos" class="spa-panel hidden space-y-6">
+        <div class="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6 lg:col-span-7">
+            <h2 class="font-serif text-lg font-bold text-[#F4F4F6]">Bloquear Día o Descanso</h2>
+            <p class="mt-1 text-xs text-[#9A9AA6]">
+              Toca las tarjetas para bloquear un día o turno. Para desbloquearlo posteriormente, se solicita a Soporte.
+            </p>
+
+            <form id="owner-block-form" class="mt-5 space-y-5">
+              <!-- 1. Selección Táctil de Barbero -->
+              <div>
+                <label class="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+                  1. ¿A quién deseas bloquear el horario?
+                </label>
+                <input type="hidden" id="block-barbero-input" value="TODOS_BARBEROS" />
+                <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  <button
+                    type="button"
+                    data-block-barber="TODOS_BARBEROS"
+                    class="owner-block-barber-card col-span-2 sm:col-span-1 min-h-[46px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 p-3 text-xs font-bold text-[#D4AF37] transition-all"
+                  >
+                    Toda la Barbería
+                  </button>
+                  {allBarberos.map((b) => (
+                    <button
+                      type="button"
+                      data-block-barber={b.id}
+                      class="owner-block-barber-card min-h-[46px] rounded-xl border border-[#23232C] bg-[#0B0B0E] p-3 text-xs font-bold text-[#F4F4F6] transition-all"
+                    >
+                      {b.nombre_visible}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <!-- 2. Selección Táctil de Día (8 días) -->
+              <div>
+                <label class="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+                  2. Elige el Día (Rango 8 días)
+                </label>
+                <input type="hidden" id="block-fecha-input" value={todayLima} />
+                <div class="grid grid-cols-4 gap-2 sm:grid-cols-8">
+                  {dias8Rango.map((d, idx) => (
+                    <button
+                      type="button"
+                      data-block-date={d.iso}
+                      data-weekend={d.esFinDeSemana ? '1' : '0'}
+                      class={`owner-block-date-btn flex flex-col items-center rounded-xl border py-2.5 px-1 text-center transition-all ${
+                        idx === 0
+                          ? 'border-[#D4AF37] bg-[#D4AF37]/15 text-[#F4F4F6]'
+                          : 'border-[#23232C] bg-[#0B0B0E] text-[#9A9AA6]'
+                      }`}
+                    >
+                      <span class="text-[9px] font-bold uppercase">{d.etiqueta}</span>
+                      <span class="font-mono text-sm font-bold text-[#F4F4F6]">{d.numero}</span>
+                      <span class="text-[9px]">{d.mes}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <!-- 3. Selección Táctil de Día Completo o Turno -->
+              <div>
+                <label class="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+                  3. Elige Día Completo o Hora de Descanso
+                </label>
+                <input type="hidden" id="block-horario-input" value="TODOS" />
+                <div class="grid grid-cols-2 gap-2 sm:grid-cols-3" id="owner-block-slots-grid"></div>
+              </div>
+
+              <!-- 4. Motivo Rápido con Botones + Texto -->
+              <div>
+                <label class="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+                  4. Motivo del Bloqueo
+                </label>
+                <div class="mb-2 flex flex-wrap gap-2">
+                  {['Descanso', 'Almuerzo', 'Feriado', 'Diligencia'].map((mot) => (
+                    <button
+                      type="button"
+                      data-motivo-preset={mot}
+                      class="motivo-preset-btn rounded-lg border border-[#23232C] bg-[#0B0B0E] px-3 py-1.5 text-xs font-semibold text-[#9A9AA6] hover:border-[#D4AF37] hover:text-[#D4AF37]"
+                    >
+                      {mot}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  id="block-motivo-input"
+                  value="Descanso"
+                  class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 text-xs text-[#F4F4F6] focus:border-[#D4AF37] focus:outline-none"
+                />
+              </div>
+
+              <div id="owner-block-feedback" class="hidden rounded-xl border px-4 py-2.5 text-xs"></div>
+
+              <button
+                type="submit"
+                id="owner-block-submit-btn"
+                class="min-h-[48px] w-full rounded-xl bg-[#D4AF37] py-3.5 text-xs font-bold uppercase tracking-wider text-[#0B0B0E] shadow-lg active:scale-[0.99]"
+              >
+                Confirmar Bloqueo
+              </button>
+            </form>
+          </div>
+
+          <!-- Cuadrícula de Bloqueos Activos -->
+          <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6 lg:col-span-5">
+            <h3 class="mb-4 font-serif text-base font-bold text-[#F4F4F6]">
+              Bloqueos Activos ({allBloqueos.length})
+            </h3>
+
+            {allBloqueos.length === 0 ? (
+              <div class="rounded-xl border border-[#23232C] bg-[#0B0B0E] p-8 text-center text-xs text-[#9A9AA6]">
+                No hay días ni horarios bloqueados.
+              </div>
+            ) : (
+              <div class="grid grid-cols-1 gap-3">
+                {allBloqueos.map((b) => (
+                  <div class="flex flex-col justify-between gap-3 rounded-xl border border-[#23232C] bg-[#0B0B0E] p-4 sm:flex-row sm:items-center">
+                    <div>
+                      <span class="rounded bg-[#D4AF37]/15 px-2 py-0.5 font-mono text-[10px] font-bold text-[#D4AF37]">
+                        {b.fecha} • {b.bloque_horario === 'TODOS' ? 'DÍA COMPLETO' : formatHora12(b.bloque_horario)}
+                      </span>
+                      <p class="mt-1 font-serif text-sm font-bold text-[#F4F4F6]">
+                        {b.perfiles_staff?.nombre_visible || 'Barbero'}
+                      </p>
+                      <p class="text-xs text-[#9A9AA6]">{b.motivo || 'Descanso'}</p>
+                    </div>
+                    <a
+                      href={`https://wa.me/${whatsappSoporte}?text=${encodeURIComponent(`Hola Soporte, solicito desbloquear el horario de ${b.perfiles_staff?.nombre_visible || 'Barbero'} del día ${b.fecha} (${b.bloque_horario}).`)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="flex min-h-[38px] shrink-0 items-center justify-center rounded-xl border border-[#D4AF37]/40 bg-[#D4AF37]/10 px-3 py-2 text-xs font-bold text-[#D4AF37]"
+                    >
+                      Pedir Desbloqueo
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 5: FINANZAS EN VIVO Y RENDIMIENTO                             -->
+      <!-- =================================================================== -->
+      <section id="panel-resumen" class="spa-panel hidden space-y-6">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div class="rounded-2xl border border-[#D4AF37]/40 bg-[#141419] p-5">
+            <span class="text-[11px] font-bold uppercase tracking-wider text-[#9A9AA6]">Ingresos del Mes</span>
+            <p class="mt-2 font-mono text-2xl font-bold text-[#D4AF37] sm:text-3xl">
+              S/ {ingresosTotalesMes.toFixed(2)}
+            </p>
+            <p class="mt-1 text-xs text-[#9A9AA6]">{citasCompletadasMes.length} cortes completados</p>
+          </div>
+
+          <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-5">
+            <span class="text-[11px] font-bold uppercase tracking-wider text-[#9A9AA6]">Promedio Semanal</span>
+            <p class="mt-2 font-mono text-2xl font-bold text-[#F4F4F6] sm:text-3xl">
+              S/ {promedioSemanal}
+            </p>
+            <p class="mt-1 text-xs text-[#9A9AA6]">Semana {semanasTranscurridas} del mes</p>
+          </div>
+
+          <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-5">
+            <span class="text-[11px] font-bold uppercase tracking-wider text-[#9A9AA6]">Fiabilidad</span>
+            <p class="mt-2 font-mono text-2xl font-bold text-[#10B981] sm:text-3xl">
+              {tasaFiabilidad}%
+            </p>
+            <p class="mt-1 text-xs text-[#9A9AA6]">Asistencia efectiva</p>
+          </div>
+
+          <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-5">
+            <span class="text-[11px] font-bold uppercase tracking-wider text-[#9A9AA6]">Medios de Pago</span>
+            <div class="mt-3 space-y-2 text-xs">
+              <div class="flex justify-between">
+                <span>Efectivo:</span>
+                <strong class="font-mono text-[#F4F4F6]">S/ {totalEfectivo.toFixed(2)}</strong>
+              </div>
+              <div class="flex justify-between">
+                <span>Yape / Plin:</span>
+                <strong class="font-mono text-[#D4AF37]">S/ {totalYapePlin.toFixed(2)}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Rendimiento por Trabajador en Cuadrados Responsivos -->
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+          <h2 class="mb-4 font-serif text-lg font-bold text-[#F4F4F6]">Rendimiento por Trabajador</h2>
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {rendimientoBarberos.map((b) => (
+              <div class="rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-4">
+                <div class="flex items-center justify-between border-b border-[#23232C] pb-3">
+                  <div>
+                    <h3 class="font-serif text-base font-bold text-[#F4F4F6]">{b.nombre}</h3>
+                    <span class="text-[10px] font-bold uppercase text-[#D4AF37]">
+                      {b.esGerente ? 'Gerencia y Barbero' : 'Barbero'}
+                    </span>
+                  </div>
+                  <span class="font-mono text-lg font-bold text-[#D4AF37]">
+                    S/ {b.totalGenerado.toFixed(2)}
+                  </span>
+                </div>
+                <div class="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
+                  <div class="rounded-xl bg-[#141419] p-2.5">
+                    <span class="block font-mono text-base font-bold text-[#10B981]">{b.cortesCompletados}</span>
+                    <span class="text-[10px] text-[#9A9AA6]">Completados</span>
+                  </div>
+                  <div class="rounded-xl bg-[#141419] p-2.5">
+                    <span class="block font-mono text-base font-bold text-[#D4AF37]">{b.enAgenda}</span>
+                    <span class="text-[10px] text-[#9A9AA6]">En Agenda</span>
+                  </div>
+                  <div class="rounded-xl bg-[#141419] p-2.5">
+                    <span class="block font-mono text-base font-bold text-[#EF4444]">{b.cancelaciones}</span>
+                    <span class="text-[10px] text-[#9A9AA6]">Faltas/Canc.</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL TÁCTIL: AGENDAR CITA MANUAL (GERENCIA)                        -->
+  <!-- =================================================================== -->
+  <div id="owner-manual-book-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+    <div class="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-[#23232C] bg-[#141419] p-5 shadow-2xl">
+      <div class="mb-4 flex items-center justify-between border-b border-[#23232C] pb-3">
+        <div>
+          <h3 class="font-serif text-base font-bold text-[#F4F4F6]">Agendar Cita Directa</h3>
+          <p class="text-xs text-[#D4AF37]">Registra el turno de un cliente para cualquier barbero</p>
+        </div>
+        <button type="button" id="close-owner-manual-book" class="rounded-lg p-2 text-[#9A9AA6] hover:text-[#F4F4F6]" aria-label="Cerrar">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <form id="owner-manual-book-form" class="space-y-4">
+        <input type="hidden" id="omb-barbero-id" value={allBarberos[0]?.id || ''} />
+        <input type="hidden" id="omb-servicio-id" value={allServicios[0]?.id || 1} />
+        <input type="hidden" id="omb-fecha" value={todayLima} />
+        <input type="hidden" id="omb-bloque" value="" />
+        <input type="hidden" id="omb-pago" value="efectivo" />
+
+        <!-- 1. Seleccionar Barbero -->
+        <div>
+          <label class="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+            1. Elige el Barbero
+          </label>
+          <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {allBarberos.map((b, idx) => (
+              <button
+                type="button"
+                data-omb-barber={b.id}
+                class={`omb-barber-card min-h-[42px] rounded-xl border p-2.5 text-xs font-bold transition-all ${
+                  idx === 0
+                    ? 'border-[#D4AF37] bg-[#D4AF37]/15 text-[#D4AF37]'
+                    : 'border-[#23232C] bg-[#0B0B0E] text-[#F4F4F6]'
+                }`}
+              >
+                {b.nombre_visible}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <!-- 2. Seleccionar Servicio -->
+        <div>
+          <label class="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+            2. Servicio
+          </label>
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            {allServicios.map((s, idx) => (
+              <button
+                type="button"
+                data-omb-srv={s.id}
+                class={`omb-srv-card rounded-xl border p-2.5 text-left transition-all ${
+                  idx === 0
+                    ? 'border-[#D4AF37] bg-[#D4AF37]/15 text-[#F4F4F6]'
+                    : 'border-[#23232C] bg-[#0B0B0E] text-[#9A9AA6]'
+                }`}
+              >
+                <span class="block text-xs font-bold text-[#F4F4F6]">{s.nombre}</span>
+                <span class="font-mono text-xs font-bold text-[#D4AF37]">S/ {Number(s.precio).toFixed(2)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <!-- 3. Seleccionar Día (8 días) -->
+        <div>
+          <label class="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+            3. Día (Rango 8 días)
+          </label>
+          <div class="grid grid-cols-4 gap-1.5 sm:grid-cols-8">
+            {dias8Rango.map((d, idx) => (
+              <button
+                type="button"
+                data-omb-date={d.iso}
+                class={`omb-date-card flex flex-col items-center rounded-xl border py-2 px-1 text-center ${
+                  idx === 0
+                    ? 'border-[#D4AF37] bg-[#D4AF37]/15 text-[#F4F4F6]'
+                    : 'border-[#23232C] bg-[#0B0B0E] text-[#9A9AA6]'
+                }`}
+              >
+                <span class="text-[8px] font-bold uppercase">{d.etiqueta}</span>
+                <span class="font-mono text-xs font-bold text-[#F4F4F6]">{d.numero}</span>
+                <span class="text-[8px]">{d.mes}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <!-- 4. Seleccionar Hora -->
+        <div>
+          <label class="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+            4. Horario Disponible
+          </label>
+          <div id="omb-slots-container" class="grid grid-cols-3 gap-2"></div>
+        </div>
+
+        <!-- 5. Datos del Cliente -->
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div>
+            <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">DNI (8 dígitos)</label>
+            <input
+              type="text"
+              id="omb-dni"
+              required
+              maxlength="8"
+              pattern="[0-9]{8}"
+              inputmode="numeric"
+              placeholder="Ej: 71234567"
+              class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-2.5 font-mono text-xs text-[#F4F4F6]"
+            />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">WhatsApp / Celular</label>
+            <input
+              type="tel"
+              id="omb-telefono"
+              required
+              maxlength="15"
+              inputmode="tel"
+              placeholder="Ej: 987654321"
+              class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-2.5 font-mono text-xs text-[#F4F4F6]"
+            />
+          </div>
+        </div>
+
+        <div>
+          <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Nombre Completo del Cliente</label>
+          <input
+            type="text"
+            id="omb-nombre"
+            required
+            placeholder="Ej: Carlos Mendoza"
+            class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-2.5 text-xs text-[#F4F4F6]"
+          />
+        </div>
+
+        <!-- 6. Método de Pago (Solo Efectivo y Yape / Plin) -->
+        <div>
+          <label class="mb-1.5 block text-[10px] font-bold uppercase text-[#D4AF37]">Método de Pago</label>
+          <div class="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              data-omb-pay="efectivo"
+              class="omb-pay-card min-h-[40px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2 text-xs font-bold text-[#D4AF37]"
+            >
+              Efectivo
+            </button>
+            <button
+              type="button"
+              data-omb-pay="yape_plin"
+              class="omb-pay-card min-h-[40px] rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2 text-xs font-bold text-[#F4F4F6]"
+            >
+              Yape / Plin
+            </button>
+          </div>
+        </div>
+
+        <div id="omb-feedback" class="hidden rounded-xl border px-3.5 py-2.5 text-xs"></div>
+
+        <button
+          type="submit"
+          class="min-h-[46px] w-full rounded-xl bg-[#D4AF37] py-3 text-xs font-bold uppercase tracking-wider text-[#0B0B0E] shadow-lg"
+        >
+          Confirmar y Agendar Cita
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL TÁCTIL PARA REPROGRAMAR / CAMBIAR BARBERO                     -->
+  <!-- =================================================================== -->
+  <div id="reassign-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+    <div class="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-[#23232C] bg-[#141419] p-5 shadow-2xl">
+      <div class="mb-4 flex items-center justify-between border-b border-[#23232C] pb-3">
+        <div>
+          <h3 class="font-serif text-base font-bold text-[#F4F4F6]">Reprogramar Turno</h3>
+          <p id="reassign-client-label" class="text-xs text-[#D4AF37]"></p>
+        </div>
+        <button type="button" id="close-reassign-modal" class="rounded-lg p-2 text-[#9A9AA6] hover:text-[#F4F4F6]" aria-label="Cerrar">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <form id="reassign-form" class="space-y-4">
+        <input type="hidden" id="reassign-cita-id" />
+        <input type="hidden" id="reassign-barbero" />
+        <input type="hidden" id="reassign-fecha" value={todayLima} />
+        <input type="hidden" id="reassign-bloque" value="" />
+
+        <!-- 1. Selección Táctil de Barbero -->
+        <div>
+          <label class="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+            1. Elige el Barbero
+          </label>
+          <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {allBarberos.map((b) => (
+              <button
+                type="button"
+                data-modal-barber={b.id}
+                class="modal-barber-card min-h-[44px] rounded-xl border border-[#23232C] bg-[#0B0B0E] p-2.5 text-xs font-bold text-[#F4F4F6] transition-all"
+              >
+                {b.nombre_visible}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <!-- 2. Selección Táctil de Fecha (8 días) -->
+        <div>
+          <label class="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+            2. Elige Nueva Fecha (Rango 8 días)
+          </label>
+          <div class="grid grid-cols-4 gap-1.5 sm:grid-cols-8">
+            {dias8Rango.map((d) => (
+              <button
+                type="button"
+                data-modal-date={d.iso}
+                class="modal-date-card flex flex-col items-center rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2 px-1 text-center text-[#9A9AA6]"
+              >
+                <span class="text-[8px] font-bold uppercase">{d.etiqueta}</span>
+                <span class="font-mono text-xs font-bold text-[#F4F4F6]">{d.numero}</span>
+                <span class="text-[8px]">{d.mes}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <!-- 3. Selección Táctil de Hora -->
+        <div>
+          <label class="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+            3. Elige Nuevo Horario
+          </label>
+          <div id="modal-slots-container" class="grid grid-cols-3 gap-2"></div>
+        </div>
+
+        <div id="reassign-feedback" class="hidden rounded-xl border px-3.5 py-2.5 text-xs"></div>
+
+        <div class="grid grid-cols-2 gap-2 pt-2">
+          <button type="button" id="cancel-reassign-btn" class="min-h-[44px] rounded-xl border border-[#23232C] bg-[#0B0B0E] text-xs font-bold text-[#9A9AA6]">
+            Cancelar
+          </button>
+          <button type="submit" class="min-h-[44px] rounded-xl bg-[#D4AF37] text-xs font-bold uppercase text-[#0B0B0E]">
+            Guardar Cambios
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</Layout>
+
+<script define:vars={{ bloquesLv: configBarberia.bloques_lv, bloquesSd: configBarberia.bloques_sd }}>
+  function format12h(hhmm) {
+    if (!hhmm || !hhmm.includes(':')) return hhmm;
+    const [hStr, mStr] = hhmm.split(':');
+    const h = parseInt(hStr, 10);
+    const suffix = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 || 12;
+    return `${h12}:${mStr} ${suffix}`;
+  }
+
+  // 1. NAVEGACIÓN SPA CON MENÚ DESPLEGABLE Y PERSISTENCIA EN SESSIONSTORAGE
+  const tabBtns = document.querySelectorAll('.spa-tab-btn');
+  const panels = document.querySelectorAll('.spa-panel');
+  const navDropdownWrapper = document.getElementById('owner-nav-dropdown-wrapper');
+  const navDropdownTrigger = document.getElementById('owner-nav-dropdown-trigger');
+  const navDropdownMenu = document.getElementById('owner-nav-dropdown-menu');
+  const navCurrentLabel = document.getElementById('owner-nav-current-label');
+  const navChevron = document.getElementById('owner-nav-chevron');
+
+  let isOwnerDropdownOpen = false;
+
+  function openOwnerDropdown() {
+    if (!navDropdownMenu) return;
+    isOwnerDropdownOpen = true;
+    navDropdownMenu.classList.remove('hidden');
+    navDropdownMenu.classList.remove('nav-dropdown-closing');
+    navDropdownMenu.classList.add('nav-dropdown-opening');
+    navDropdownTrigger?.setAttribute('aria-expanded', 'true');
+    navChevron?.classList.add('rotate-180');
+  }
+
+  function closeOwnerDropdown() {
+    if (!navDropdownMenu || !isOwnerDropdownOpen) return;
+    isOwnerDropdownOpen = false;
+    navDropdownMenu.classList.remove('nav-dropdown-opening');
+    navDropdownMenu.classList.add('nav-dropdown-closing');
+    navDropdownTrigger?.setAttribute('aria-expanded', 'false');
+    navChevron?.classList.remove('rotate-180');
+    setTimeout(() => {
+      if (!isOwnerDropdownOpen) {
+        navDropdownMenu.classList.add('hidden');
+        navDropdownMenu.classList.remove('nav-dropdown-closing');
+      }
+    }, 160);
+  }
+
+  navDropdownTrigger?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!isOwnerDropdownOpen) {
+      openOwnerDropdown();
+    } else {
+      closeOwnerDropdown();
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (navDropdownWrapper && !navDropdownWrapper.contains(e.target)) {
+      closeOwnerDropdown();
+    }
+  });
+
+  function activateOwnerTab(targetId) {
+    if (!targetId) return;
+    tabBtns.forEach((b, idx) => {
+      const mtClass = idx === 0 ? '' : 'mt-1 ';
+      if (b.getAttribute('data-spa-target') === targetId) {
+        b.className = `${mtClass}spa-tab-btn flex min-h-[42px] w-full items-center justify-between rounded-xl bg-[#D4AF37] px-3.5 py-2 text-xs font-bold text-[#0B0B0E] transition-all`;
+        if (navCurrentLabel) {
+          navCurrentLabel.textContent = b.getAttribute('data-spa-label') || 'Calendario Día';
+        }
+      } else {
+        b.className = `${mtClass}spa-tab-btn flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all`;
+      }
+    });
+    panels.forEach((p) => {
+      if (p.id === targetId) p.classList.remove('hidden');
+      else p.classList.add('hidden');
+    });
+    sessionStorage.setItem('owner_active_tab', targetId);
+    closeOwnerDropdown();
+  }
+
+  const savedOwnerTab = sessionStorage.getItem('owner_active_tab');
+  if (savedOwnerTab && document.getElementById(savedOwnerTab)) {
+    activateOwnerTab(savedOwnerTab);
+  }
+
+  tabBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      activateOwnerTab(btn.getAttribute('data-spa-target'));
+    });
+  });
+
+  // 2. LOGOUT
+  document.getElementById('owner-logout-btn')?.addEventListener('click', async () => {
+    sessionStorage.clear();
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.reload();
+  });
+
+  // 3. CALENDARIO DE CORTES POR DÍA Y POR TRABAJADOR (CON PERSISTENCIA)
+  const calDayBtns = document.querySelectorAll('.cal-day-btn');
+  const calDayPanels = document.querySelectorAll('.cal-day-panel');
+
+  function activateOwnerCalDay(iso) {
+    if (!iso) return;
+    calDayBtns.forEach((b) => {
+      if (b.getAttribute('data-cal-date') === iso) {
+        b.className = 'cal-day-btn flex flex-col items-center justify-center rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2.5 px-1 text-center text-[#F4F4F6] shadow-[0_0_15px_rgba(212,175,55,0.18)] transition-all active:scale-95';
+      } else {
+        b.className = 'cal-day-btn flex flex-col items-center justify-center rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2.5 px-1 text-center text-[#9A9AA6] transition-all active:scale-95';
+      }
+    });
+    calDayPanels.forEach((p) => {
+      if (p.getAttribute('data-cal-day-panel') === iso) p.classList.remove('hidden');
+      else p.classList.add('hidden');
+    });
+    sessionStorage.setItem('owner_cal_day', iso);
+  }
+
+  const savedOwnerCalDay = sessionStorage.getItem('owner_cal_day');
+  if (savedOwnerCalDay && document.querySelector(`[data-cal-day-panel="${savedOwnerCalDay}"]`)) {
+    activateOwnerCalDay(savedOwnerCalDay);
+  }
+
+  calDayBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      activateOwnerCalDay(btn.getAttribute('data-cal-date'));
+    });
+  });
+
+  const calWorkerBtns = document.querySelectorAll('.cal-worker-btn');
+  const calWorkerSections = document.querySelectorAll('.cal-worker-section');
+
+  function activateOwnerCalWorker(wId) {
+    if (!wId) return;
+    calWorkerBtns.forEach((b) => {
+      if (b.getAttribute('data-cal-worker') === wId) {
+        b.className = 'cal-worker-btn min-h-[42px] rounded-xl bg-[#D4AF37] px-4 py-2 text-xs font-bold text-[#0B0B0E] shadow-sm transition-all';
+      } else {
+        b.className = 'cal-worker-btn min-h-[42px] rounded-xl border border-[#23232C] bg-[#0B0B0E] px-4 py-2 text-xs font-bold text-[#F4F4F6] transition-all hover:border-[#D4AF37]/50';
+      }
+    });
+    calWorkerSections.forEach((sec) => {
+      if (wId === 'TODOS' || sec.getAttribute('data-cal-worker-section') === wId) {
+        sec.classList.remove('hidden');
+      } else {
+        sec.classList.add('hidden');
+      }
+    });
+    sessionStorage.setItem('owner_cal_worker', wId);
+  }
+
+  const savedOwnerCalWorker = sessionStorage.getItem('owner_cal_worker');
+  if (savedOwnerCalWorker) {
+    activateOwnerCalWorker(savedOwnerCalWorker);
+  }
+
+  calWorkerBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      activateOwnerCalWorker(btn.getAttribute('data-cal-worker'));
+    });
+  });
+
+  // Botón rápido para bloquear un turno libre desde el calendario
+  document.querySelectorAll('.quick-block-slot-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const barbero_id = btn.getAttribute('data-barbero-id');
+      const fecha = btn.getAttribute('data-fecha');
+      const bloque_horario = btn.getAttribute('data-bloque');
+      const res = await fetch('/api/owner/gestion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accion: 'bloquear_horario',
+          barbero_id,
+          fecha,
+          bloque_horario,
+          motivo: 'Descanso',
+        }),
+      });
+      if (res.ok) {
+        window.location.reload();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Error al bloquear turno');
+      }
+    });
+  });
+
+  // 4. BOTONES TÁCTILES DE CAMBIO DE ESTADO (APROBAR, COMPLETAR, RECHAZAR, NO ASISTIÓ)
+  document.querySelectorAll('.owner-status-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const citaId = btn.getAttribute('data-cita-id');
+      const nuevoEstado = btn.getAttribute('data-estado');
+      const res = await fetch('/api/owner/gestion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'cambiar_estado', cita_id: citaId, nuevo_estado: nuevoEstado }),
+      });
+      if (res.ok) {
+        window.location.reload();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Error al cambiar estado');
+      }
+    });
+  });
+
+  // 5. FILTRO DE CUADRÍCULA DE CITAS (CON PERSISTENCIA)
+  const filterBtns = document.querySelectorAll('.owner-filter-btn');
+  const citaCards = document.querySelectorAll('.owner-cita-card');
+
+  function applyOwnerCitaFilter(est) {
+    if (!est) return;
+    filterBtns.forEach((b) => {
+      if (b.getAttribute('data-estado') === est) {
+        b.className = 'owner-filter-btn min-h-[38px] rounded-xl bg-[#D4AF37] px-3.5 py-1.5 text-xs font-bold text-[#0B0B0E]';
+      } else {
+        b.className = 'owner-filter-btn min-h-[38px] rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-1.5 text-xs font-semibold text-[#9A9AA6]';
+      }
+    });
+    citaCards.forEach((card) => {
+      const cardEst = card.getAttribute('data-estado');
+      card.style.display = est === 'todos' || cardEst === est ? '' : 'none';
+    });
+    sessionStorage.setItem('owner_citas_filter', est);
+  }
+
+  const savedOwnerFilter = sessionStorage.getItem('owner_citas_filter');
+  if (savedOwnerFilter) {
+    applyOwnerCitaFilter(savedOwnerFilter);
+  }
+
+  filterBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      applyOwnerCitaFilter(btn.getAttribute('data-estado'));
+    });
+  });
+
+  // 6. MODAL TÁCTIL: AGENDAR CITA MANUAL (GERENCIA)
+  const ombModal = document.getElementById('owner-manual-book-modal');
+  const ombBarberInput = document.getElementById('omb-barbero-id');
+  const ombSrvInput = document.getElementById('omb-servicio-id');
+  const ombFechaInput = document.getElementById('omb-fecha');
+  const ombBloqueInput = document.getElementById('omb-bloque');
+  const ombPagoInput = document.getElementById('omb-pago');
+  const ombSlotsContainer = document.getElementById('omb-slots-container');
+  const ombFeedback = document.getElementById('omb-feedback');
+
+  async function loadOmbSlots() {
+    if (!ombSlotsContainer || !ombBarberInput || !ombFechaInput) return;
+    const bId = ombBarberInput.value;
+    const fec = ombFechaInput.value;
+    ombSlotsContainer.innerHTML = `<div class="col-span-3 py-2 text-center text-xs text-[#9A9AA6]">Cargando horarios...</div>`;
+    const res = await fetch(`/api/public/disponibilidad?barbero_id=${encodeURIComponent(bId)}&fecha=${encodeURIComponent(fec)}`);
+    const data = await res.json();
+    const detalle = data.detalle || [];
+    ombSlotsContainer.innerHTML = '';
+    ombBloqueInput.value = '';
+
+    detalle.forEach((slot) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.disabled = !slot.disponible;
+      btn.className = slot.disponible
+        ? 'omb-slot-btn min-h-[40px] rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2 px-2 font-mono text-xs font-bold text-[#F4F4F6]'
+        : 'min-h-[40px] rounded-xl border border-[#23232C]/40 bg-[#0B0B0E]/40 py-2 px-2 font-mono text-xs text-[#9A9AA6] line-through opacity-40 cursor-not-allowed';
+      btn.textContent = format12h(slot.hora);
+      if (slot.disponible) {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.omb-slot-btn').forEach((b) => {
+            b.className = 'omb-slot-btn min-h-[40px] rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2 px-2 font-mono text-xs font-bold text-[#F4F4F6]';
+          });
+          btn.className = 'omb-slot-btn min-h-[40px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/20 py-2 px-2 font-mono text-xs font-bold text-[#D4AF37]';
+          ombBloqueInput.value = slot.hora;
+        });
+      }
+      ombSlotsContainer.appendChild(btn);
+    });
+  }
+
+  document.getElementById('open-owner-manual-book-btn')?.addEventListener('click', () => {
+    loadOmbSlots();
+    ombModal?.classList.remove('hidden');
+    ombModal?.classList.add('flex');
+  });
+
+  document.getElementById('close-owner-manual-book')?.addEventListener('click', () => {
+    ombModal?.classList.add('hidden');
+    ombModal?.classList.remove('flex');
+  });
+
+  document.querySelectorAll('.omb-barber-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.omb-barber-card').forEach((c) => {
+        c.className = 'omb-barber-card min-h-[42px] rounded-xl border border-[#23232C] bg-[#0B0B0E] p-2.5 text-xs font-bold text-[#F4F4F6] transition-all';
+      });
+      card.className = 'omb-barber-card min-h-[42px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 p-2.5 text-xs font-bold text-[#D4AF37] transition-all';
+      ombBarberInput.value = card.getAttribute('data-omb-barber') || '';
+      loadOmbSlots();
+    });
+  });
+
+  document.querySelectorAll('.omb-srv-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.omb-srv-card').forEach((c) => {
+        c.className = 'omb-srv-card rounded-xl border border-[#23232C] bg-[#0B0B0E] p-2.5 text-left text-[#9A9AA6] transition-all';
+      });
+      card.className = 'omb-srv-card rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 p-2.5 text-left text-[#F4F4F6] transition-all';
+      ombSrvInput.value = card.getAttribute('data-omb-srv') || '1';
+    });
+  });
+
+  document.querySelectorAll('.omb-date-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.omb-date-card').forEach((c) => {
+        c.className = 'omb-date-card flex flex-col items-center rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2 px-1 text-center text-[#9A9AA6]';
+      });
+      card.className = 'omb-date-card flex flex-col items-center rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2 px-1 text-center text-[#F4F4F6]';
+      ombFechaInput.value = card.getAttribute('data-omb-date') || '';
+      loadOmbSlots();
+    });
+  });
+
+  document.querySelectorAll('.omb-pay-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.omb-pay-card').forEach((c) => {
+        c.className = 'omb-pay-card min-h-[40px] rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2 text-xs font-bold text-[#F4F4F6]';
+      });
+      card.className = 'omb-pay-card min-h-[40px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2 text-xs font-bold text-[#D4AF37]';
+      ombPagoInput.value = card.getAttribute('data-omb-pay') || 'efectivo';
+    });
+  });
+
+  document.getElementById('owner-manual-book-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!ombBloqueInput.value) {
+      if (ombFeedback) {
+        ombFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+        ombFeedback.textContent = 'Selecciona un horario disponible.';
+        ombFeedback.classList.remove('hidden');
+      }
+      return;
+    }
+
+    const dni = document.getElementById('omb-dni').value.trim();
+    const telefono = document.getElementById('omb-telefono').value.trim();
+    const nombre_completo = document.getElementById('omb-nombre').value.trim();
+
+    const res = await fetch('/api/owner/gestion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accion: 'agendar_manual',
+        barbero_id: ombBarberInput.value,
+        servicio_id: Number(ombSrvInput.value),
+        fecha: ombFechaInput.value,
+        bloque_horario: ombBloqueInput.value,
+        dni,
+        telefono,
+        nombre_completo,
+        metodo_pago: ombPagoInput.value,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.exito) {
+      if (ombFeedback) {
+        ombFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+        ombFeedback.textContent = data.error || 'Error al agendar cita.';
+        ombFeedback.classList.remove('hidden');
+      }
+      return;
+    }
+    window.location.reload();
+  });
+
+  // 7. MODAL TÁCTIL DE REPROGRAMACIÓN
+  const reassignModal = document.getElementById('reassign-modal');
+  const reassignCitaId = document.getElementById('reassign-cita-id');
+  const reassignBarbero = document.getElementById('reassign-barbero');
+  const reassignFecha = document.getElementById('reassign-fecha');
+  const reassignBloque = document.getElementById('reassign-bloque');
+  const modalSlotsContainer = document.getElementById('modal-slots-container');
+  const reassignFeedback = document.getElementById('reassign-feedback');
+
+  function highlightModalBarber(bId) {
+    document.querySelectorAll('.modal-barber-card').forEach((card) => {
+      if (card.getAttribute('data-modal-barber') === bId) {
+        card.className = 'modal-barber-card min-h-[44px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/20 p-2.5 text-xs font-bold text-[#D4AF37] transition-all';
+      } else {
+        card.className = 'modal-barber-card min-h-[44px] rounded-xl border border-[#23232C] bg-[#0B0B0E] p-2.5 text-xs font-bold text-[#F4F4F6] transition-all';
+      }
+    });
+  }
+
+  function highlightModalDate(iso) {
+    document.querySelectorAll('.modal-date-card').forEach((card) => {
+      if (card.getAttribute('data-modal-date') === iso) {
+        card.className = 'modal-date-card flex flex-col items-center rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2 px-1 text-center text-[#F4F4F6]';
+      } else {
+        card.className = 'modal-date-card flex flex-col items-center rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2 px-1 text-center text-[#9A9AA6]';
+      }
+    });
+  }
+
+  async function loadModalSlots() {
+    const bId = reassignBarbero?.value;
+    const fec = reassignFecha?.value;
+    if (!bId || !fec || !modalSlotsContainer) return;
+
+    modalSlotsContainer.innerHTML = `<div class="col-span-3 py-3 text-center text-xs text-[#9A9AA6]">Cargando horarios...</div>`;
+    const res = await fetch(`/api/public/disponibilidad?barbero_id=${encodeURIComponent(bId)}&fecha=${encodeURIComponent(fec)}`);
+    const data = await res.json();
+    const detalle = data.detalle || [];
+    modalSlotsContainer.innerHTML = '';
+
+    detalle.forEach((slot) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const isCurrent = reassignBloque.value === slot.hora;
+      const canPick = slot.disponible || isCurrent;
+
+      btn.disabled = !canPick;
+      btn.className = canPick
+        ? `modal-slot-btn min-h-[42px] rounded-xl border py-2.5 px-2 font-mono text-xs font-bold transition-all ${
+            isCurrent
+              ? 'border-[#D4AF37] bg-[#D4AF37]/20 text-[#D4AF37]'
+              : 'border-[#23232C] bg-[#0B0B0E] text-[#F4F4F6]'
+          }`
+        : 'min-h-[42px] rounded-xl border border-[#23232C]/40 bg-[#0B0B0E]/40 py-2.5 px-2 font-mono text-xs text-[#9A9AA6] line-through opacity-40 cursor-not-allowed';
+
+      btn.textContent = format12h(slot.hora);
+      if (canPick) {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.modal-slot-btn').forEach((b) => {
+            b.className = 'modal-slot-btn min-h-[42px] rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2.5 px-2 font-mono text-xs font-bold text-[#F4F4F6]';
+          });
+          btn.className = 'modal-slot-btn min-h-[42px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/20 py-2.5 px-2 font-mono text-xs font-bold text-[#D4AF37]';
+          reassignBloque.value = slot.hora;
+        });
+      }
+      modalSlotsContainer.appendChild(btn);
+    });
+  }
+
+  document.querySelectorAll('.open-reassign-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      reassignCitaId.value = btn.getAttribute('data-cita-id') || '';
+      const bId = btn.getAttribute('data-barbero-id') || '';
+      const f = btn.getAttribute('data-fecha') || '';
+      const b = btn.getAttribute('data-bloque') || '';
+      reassignBarbero.value = bId;
+      reassignFecha.value = f;
+      reassignBloque.value = b;
+      const clientLabel = document.getElementById('reassign-client-label');
+      if (clientLabel) clientLabel.textContent = `Cliente: ${btn.getAttribute('data-cliente')}`;
+      highlightModalBarber(bId);
+      highlightModalDate(f);
+      loadModalSlots();
+      reassignModal?.classList.remove('hidden');
+      reassignModal?.classList.add('flex');
+    });
+  });
+
+  document.querySelectorAll('.modal-barber-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      const bId = card.getAttribute('data-modal-barber') || '';
+      reassignBarbero.value = bId;
+      highlightModalBarber(bId);
+      loadModalSlots();
+    });
+  });
+
+  document.querySelectorAll('.modal-date-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      const iso = card.getAttribute('data-modal-date') || '';
+      reassignFecha.value = iso;
+      highlightModalDate(iso);
+      loadModalSlots();
+    });
+  });
+
+  const closeReassign = () => {
+    reassignModal?.classList.add('hidden');
+    reassignModal?.classList.remove('flex');
+  };
+  document.getElementById('close-reassign-modal')?.addEventListener('click', closeReassign);
+  document.getElementById('cancel-reassign-btn')?.addEventListener('click', closeReassign);
+
+  document.getElementById('reassign-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const res = await fetch('/api/owner/gestion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accion: 'reasignar_o_reagendar',
+        cita_id: reassignCitaId.value,
+        nuevo_barbero_id: reassignBarbero.value,
+        nueva_fecha: reassignFecha.value,
+        nuevo_bloque: reassignBloque.value,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.exito) {
+      if (reassignFeedback) {
+        reassignFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+        reassignFeedback.textContent = data.error || 'Error al reprogramar.';
+        reassignFeedback.classList.remove('hidden');
+      }
+      return;
+    }
+    window.location.reload();
+  });
+
+  // 8. BLOQUEAR DÍA O DESCANSOS
+  const blockBarberoInput = document.getElementById('block-barbero-input');
+  const blockFechaInput = document.getElementById('block-fecha-input');
+  const blockHorarioInput = document.getElementById('block-horario-input');
+  const blockMotivoInput = document.getElementById('block-motivo-input');
+  const blockSlotsGrid = document.getElementById('owner-block-slots-grid');
+
+  document.querySelectorAll('.owner-block-barber-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.owner-block-barber-card').forEach((c) => {
+        const isTodos = c.getAttribute('data-block-barber') === 'TODOS_BARBEROS';
+        c.className = `owner-block-barber-card ${isTodos ? 'col-span-2 sm:col-span-1 ' : ''}min-h-[46px] rounded-xl border border-[#23232C] bg-[#0B0B0E] p-3 text-xs font-bold text-[#F4F4F6] transition-all`;
+      });
+      const isCardTodos = card.getAttribute('data-block-barber') === 'TODOS_BARBEROS';
+      card.className = `owner-block-barber-card ${isCardTodos ? 'col-span-2 sm:col-span-1 ' : ''}min-h-[46px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 p-3 text-xs font-bold text-[#D4AF37] transition-all`;
+      if (blockBarberoInput) blockBarberoInput.value = card.getAttribute('data-block-barber') || 'TODOS_BARBEROS';
+    });
+  });
+
+  document.querySelectorAll('.motivo-preset-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (blockMotivoInput) blockMotivoInput.value = btn.getAttribute('data-motivo-preset') || 'Descanso';
+    });
+  });
+
+  function renderBlockSlots(isWeekend) {
+    if (!blockSlotsGrid) return;
+    const slots = isWeekend ? (bloquesSd || ['15:00', '16:10', '17:20', '19:00']) : (bloquesLv || ['16:30', '17:40', '18:50', '20:00', '21:10']);
+    if (blockHorarioInput) blockHorarioInput.value = 'TODOS';
+    blockSlotsGrid.innerHTML = '';
+
+    const options = [{ val: 'TODOS', label: 'Día Completo (Cerrado)' }, ...slots.map((s) => ({ val: s, label: `Turno ${format12h(s)}` }))];
+    options.forEach((opt, i) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = i === 0
+        ? 'owner-block-slot-pill col-span-2 sm:col-span-3 min-h-[42px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2.5 px-3 text-xs font-bold text-[#D4AF37]'
+        : 'owner-block-slot-pill min-h-[42px] rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2.5 px-3 font-mono text-xs text-[#F4F4F6]';
+      btn.textContent = opt.label;
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.owner-block-slot-pill').forEach((b, idx) => {
+          b.className = idx === 0
+            ? 'owner-block-slot-pill col-span-2 sm:col-span-3 min-h-[42px] rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2.5 px-3 text-xs font-bold text-[#9A9AA6]'
+            : 'owner-block-slot-pill min-h-[42px] rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2.5 px-3 font-mono text-xs text-[#9A9AA6]';
+        });
+        btn.className = i === 0
+          ? 'owner-block-slot-pill col-span-2 sm:col-span-3 min-h-[42px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2.5 px-3 text-xs font-bold text-[#D4AF37]'
+          : 'owner-block-slot-pill min-h-[42px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2.5 px-3 font-mono text-xs font-bold text-[#D4AF37]';
+        if (blockHorarioInput) blockHorarioInput.value = opt.val;
+      });
+      blockSlotsGrid.appendChild(btn);
+    });
+  }
+
+  document.querySelectorAll('.owner-block-date-btn').forEach((btn, idx) => {
+    if (idx === 0) renderBlockSlots(btn.getAttribute('data-weekend') === '1');
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.owner-block-date-btn').forEach((b) => {
+        b.className = 'owner-block-date-btn flex flex-col items-center rounded-xl border border-[#23232C] bg-[#0B0B0E] py-2.5 px-1 text-center text-[#9A9AA6]';
+      });
+      btn.className = 'owner-block-date-btn flex flex-col items-center rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2.5 px-1 text-center text-[#F4F4F6]';
+      if (blockFechaInput) blockFechaInput.value = btn.getAttribute('data-block-date') || '';
+      renderBlockSlots(btn.getAttribute('data-weekend') === '1');
+    });
+  });
+
+  document.getElementById('owner-block-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fb = document.getElementById('owner-block-feedback');
+    const submitBtn = document.getElementById('owner-block-submit-btn');
+    const barbero_id = blockBarberoInput?.value;
+    const fecha = blockFechaInput?.value;
+    const bloque_horario = blockHorarioInput?.value;
+    const motivo = blockMotivoInput?.value;
+
+    if (submitBtn) {
+      submitBtn.setAttribute('disabled', 'true');
+      submitBtn.textContent = 'Bloqueando...';
+    }
+
+    try {
+      const res = await fetch('/api/owner/gestion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'bloquear_horario', barbero_id, fecha, bloque_horario, motivo }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.exito) {
+        if (fb) {
+          fb.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-4 py-2.5 text-xs text-[#EF4444]';
+          fb.textContent = data.error || 'Error al bloquear.';
+          fb.classList.remove('hidden');
+        }
+        if (submitBtn) {
+          submitBtn.removeAttribute('disabled');
+          submitBtn.textContent = 'Confirmar Bloqueo';
+        }
+        return;
+      }
+      window.location.reload();
+    } catch (err) {
+      if (fb) {
+        fb.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-4 py-2.5 text-xs text-[#EF4444]';
+        fb.textContent = 'Error de conexión al procesar el bloqueo.';
+        fb.classList.remove('hidden');
+      }
+      if (submitBtn) {
+        submitBtn.removeAttribute('disabled');
+        submitBtn.textContent = 'Confirmar Bloqueo';
+      }
+    }
+  });
+</script>

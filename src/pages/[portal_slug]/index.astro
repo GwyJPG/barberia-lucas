@@ -1,0 +1,46 @@
+---
+export const prerender = false;
+import SuperadminPanel from '../../components/panels/SuperadminPanel.astro';
+import OwnerPanel from '../../components/panels/OwnerPanel.astro';
+import BarberPanel from '../../components/panels/BarberPanel.astro';
+
+const { portal_slug } = Astro.params;
+const secretBarberSlug = import.meta.env.SECRET_BARBER_SLUG;
+const secretOwnerSlug = import.meta.env.SECRET_OWNER_SLUG;
+const secretSuperSlug = import.meta.env.SECRET_SUPERADMIN_SLUG;
+
+// Camuflaje 404 con nuestra página 404 personalizada
+if (
+  portal_slug !== secretSuperSlug &&
+  portal_slug !== secretOwnerSlug &&
+  portal_slug !== secretBarberSlug
+) {
+  return Astro.rewrite('/404');
+}
+
+const user = Astro.locals.user;
+const rol = Astro.locals.rol;
+const nombreVisible = Astro.locals.nombre_visible || 'Operador';
+
+if (portal_slug === secretSuperSlug) {
+  if (!user || rol !== 'superadmin') {
+    return Astro.redirect(`/${secretSuperSlug}/login`);
+  }
+} else if (portal_slug === secretOwnerSlug) {
+  if (!user || !['owner', 'superadmin'].includes(rol || '')) {
+    return Astro.redirect(`/${secretOwnerSlug}/login`);
+  }
+} else {
+  if (!user || !['barber', 'owner', 'superadmin'].includes(rol || '')) {
+    return Astro.redirect(`/${secretBarberSlug}/login`);
+  }
+}
+---
+
+{portal_slug === secretSuperSlug ? (
+  <SuperadminPanel user={user} rol={rol || 'superadmin'} nombreVisible={nombreVisible} />
+) : portal_slug === secretOwnerSlug ? (
+  <OwnerPanel user={user} rol={rol || 'owner'} nombreVisible={nombreVisible} />
+) : (
+  <BarberPanel user={user} rol={rol || 'barber'} nombreVisible={nombreVisible} />
+)}

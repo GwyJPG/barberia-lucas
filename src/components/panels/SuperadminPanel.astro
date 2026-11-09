@@ -1,0 +1,1793 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import BrandLogo from '../brand/BrandLogo.astro';
+import { supabaseAdmin } from '../../lib/supabaseServer';
+
+interface Props {
+  user: any;
+  rol: string;
+  nombreVisible: string;
+}
+
+const { user, rol, nombreVisible = 'Soporte Maestro' } = Astro.props;
+const currentUserId = user?.id || '';
+const currentUserEmail = user?.email || 'soporte@barberialucas.com';
+
+let allStaff: any[] = [];
+let allServicios: any[] = [];
+let todosBloqueos: any[] = [];
+let cierresMensuales: any[] = [];
+let historialClientes: any[] = [];
+let todasCitas: any[] = [];
+let barberiaConfig: any = {
+  nombre_barberia: 'Barbería Lucas',
+  whatsapp_soporte: '51999999999',
+  whatsapp_clientes: '51999999999',
+  dias_cooldown: 14,
+  intervalo_minutos: 70,
+  max_dias_reserva: 8,
+  bloques_lv: ['16:30', '17:40', '18:50', '20:00', '21:10'],
+  bloques_sd: ['15:00', '16:10', '17:20', '19:00'],
+};
+
+try {
+  const [staffRes, serviciosRes, bloqueosRes, cierresRes, histRes, citasRes, cfgRes] = await Promise.all([
+    supabaseAdmin
+      .from('perfiles_staff')
+      .select('*')
+      .neq('rol', 'superadmin')
+      .order('rol', { ascending: false })
+      .order('nombre_visible', { ascending: true }),
+    supabaseAdmin
+      .from('servicios')
+      .select('id, nombre, precio, descripcion, activo')
+      .order('id', { ascending: true }),
+    supabaseAdmin
+      .from('bloqueos_agenda')
+      .select('id, barbero_id, fecha, bloque_horario, motivo, created_at, perfiles_staff:barbero_id (nombre_visible)')
+      .order('fecha', { ascending: true }),
+    supabaseAdmin
+      .from('cierres_mensuales')
+      .select('*')
+      .order('mes_anio', { ascending: false }),
+    supabaseAdmin
+      .from('historial_clientes')
+      .select('*')
+      .order('ultima_fecha', { ascending: false }),
+    supabaseAdmin
+      .from('citas')
+      .select('id, dni, nombre_completo, telefono, fecha, bloque_horario, estado, precio_pactado, perfiles_staff:barbero_id (nombre_visible), servicios (nombre)')
+      .order('fecha', { ascending: false })
+      .order('bloque_horario', { ascending: false }),
+    supabaseAdmin
+      .from('configuracion_barberia')
+      .select('*')
+      .eq('id', 1)
+      .maybeSingle(),
+  ]);
+
+  allStaff = staffRes.data || [];
+  allServicios = serviciosRes.data || [];
+  todosBloqueos = bloqueosRes.data || [];
+  cierresMensuales = cierresRes.data || [];
+  historialClientes = histRes.data || [];
+  todasCitas = citasRes.data || [];
+  if (cfgRes.data) barberiaConfig = { ...barberiaConfig, ...cfgRes.data };
+} catch (e) {
+  console.error('Error cargando datos en consola Superadmin:', e);
+}
+
+// Fallback si hay citas pero aún no estaban en historial_clientes
+if (historialClientes.length === 0 && todasCitas.length > 0) {
+  const mapC = new Map<string, any>();
+  for (const c of todasCitas) {
+    const prev = mapC.get(c.dni) || {
+      dni: c.dni,
+      nombre_completo: c.nombre_completo,
+      telefono: c.telefono,
+      total_agendadas: 0,
+      total_asistidas: 0,
+      total_canceladas: 0,
+      ultima_fecha: c.fecha,
+    };
+    prev.nombre_completo = c.nombre_completo;
+    prev.telefono = c.telefono;
+    prev.total_agendadas += 1;
+    if (c.estado === 'completada') prev.total_asistidas += 1;
+    if (c.estado === 'cancelada' || c.estado === 'no_asistio') prev.total_canceladas += 1;
+    if (c.fecha > prev.ultima_fecha) prev.ultima_fecha = c.fecha;
+    mapC.set(c.dni, prev);
+  }
+  historialClientes = Array.from(mapC.values());
+}
+
+function formatHora12(hhmm: string) {
+  if (!hhmm || !hhmm.includes(':')) return hhmm;
+  const [hStr, mStr] = hhmm.split(':');
+  const h = parseInt(hStr, 10);
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 || 12;
+  return `${h12}:${mStr} ${suffix}`;
+}
+---
+
+<Layout title="Soporte | Barbería Lucas">
+  <div class="min-h-screen bg-[#0B0B0E] text-[#F4F4F6] pb-20">
+    <!-- BARRA SUPERIOR COMPACTA CON DESPLEGABLE DE APARTADOS -->
+    <header class="sticky top-0 z-30 border-b border-[#23232C] bg-[#0B0B0E]/95 backdrop-blur-xl">
+      <div class="mx-auto flex max-w-7xl items-center justify-between gap-2 px-3.5 py-2.5 sm:px-6">
+        <div class="flex items-center gap-2">
+          <BrandLogo size="sm" variant="compact" />
+          <span class="rounded-md border border-[#D4AF37]/40 bg-[#D4AF37]/15 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+            Soporte
+          </span>
+        </div>
+
+        <div class="flex items-center gap-1.5 sm:gap-2">
+          <button
+            type="button"
+            id="header-profile-btn"
+            class="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl border border-[#D4AF37]/40 bg-[#D4AF37]/10 px-3 py-1.5 text-xs font-bold text-[#D4AF37] hover:bg-[#D4AF37]/20 active:scale-95 transition-all"
+            title="Mi Perfil y Contraseña"
+          >
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+            </svg>
+            <span class="hidden sm:inline">Mi Perfil</span>
+          </button>
+
+          <a
+            href="/"
+            target="_blank"
+            class="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl border border-[#23232C] bg-[#141419] px-3 py-1.5 text-xs font-semibold text-[#F4F4F6] hover:border-[#D4AF37]"
+          >
+            <span>Web</span>
+            <svg class="h-3.5 w-3.5 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+            </svg>
+          </a>
+          <button
+            type="button"
+            id="super-logout-btn"
+            class="min-h-[38px] rounded-xl border border-[#23232C] bg-[#141419] px-3 py-1.5 text-xs font-semibold text-[#9A9AA6] hover:text-[#EF4444] active:scale-95"
+          >
+            Salir
+          </button>
+        </div>
+      </div>
+
+      <!-- SELECTOR DESPLEGABLE DE APARTADOS (OCUPA 1 SOLA LÍNEA COMPACTA) -->
+      <div class="mx-auto max-w-7xl px-3.5 pb-2.5 sm:px-6">
+        <div class="relative" id="super-nav-dropdown-wrapper">
+          <button
+            type="button"
+            id="super-nav-dropdown-trigger"
+            aria-expanded="false"
+            class="flex min-h-[42px] w-full items-center justify-between gap-2 rounded-xl border border-[#D4AF37]/40 bg-[#141419] px-3.5 py-2 text-left text-xs font-bold text-[#F4F4F6] shadow-md transition-all hover:border-[#D4AF37]"
+          >
+            <span class="flex items-center gap-2">
+              <span class="flex h-6 w-6 items-center justify-center rounded-lg bg-[#D4AF37]/15 text-[#D4AF37]">
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>
+                </svg>
+              </span>
+              <span class="text-[10px] font-semibold uppercase tracking-wider text-[#9A9AA6]">Apartado:</span>
+              <span id="super-nav-current-label" class="text-xs font-bold text-[#D4AF37]">Desbloqueos ({todosBloqueos.length})</span>
+            </span>
+
+            <span class="flex items-center gap-1.5 text-[11px] font-semibold text-[#9A9AA6]">
+              <span>Cambiar</span>
+              <svg id="super-nav-chevron" class="h-4 w-4 text-[#D4AF37] transition-transform duration-200" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </span>
+          </button>
+
+          <!-- MENÚ DESPLEGABLE FLOTANTE -->
+          <div
+            id="super-nav-dropdown-menu"
+            class="absolute left-0 right-0 top-full z-40 mt-1.5 hidden rounded-2xl border border-[#D4AF37]/40 bg-[#141419] p-1.5 shadow-2xl"
+          >
+            <button
+              type="button"
+              data-super-tab="tab-desbloqueos"
+              data-super-label={`Desbloqueos (${todosBloqueos.length})`}
+              class="super-tab-btn flex min-h-[42px] w-full items-center justify-between rounded-xl bg-[#D4AF37] px-3.5 py-2 text-xs font-bold text-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>
+                </svg>
+                <span>Desbloquear Días y Descansos</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E]/20 px-2 py-0.5 font-mono text-[11px]">{todosBloqueos.length}</span>
+            </button>
+
+            <button
+              type="button"
+              data-super-tab="tab-staff"
+              data-super-label={`Personal (${allStaff.length})`}
+              class="super-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+                <span>Personal (Gerencia y Barberos)</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E] px-2 py-0.5 font-mono text-[11px] text-[#D4AF37]">{allStaff.length}</span>
+            </button>
+
+            <button
+              type="button"
+              data-super-tab="tab-pruebas"
+              data-super-label={`Limpiar Pruebas (${historialClientes.length})`}
+              class="super-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#EF4444]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
+                </svg>
+                <span>Limpiar Pruebas y Clientes</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E] px-2 py-0.5 font-mono text-[11px] text-[#EF4444]">{historialClientes.length}</span>
+            </button>
+
+            <button
+              type="button"
+              data-super-tab="tab-servicios"
+              data-super-label="3 Servicios y Tarifas"
+              class="super-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/>
+                </svg>
+                <span>Los 3 Servicios y Tarifas</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E] px-2 py-0.5 font-mono text-[11px] text-[#D4AF37]">3</span>
+            </button>
+
+            <button
+              type="button"
+              data-super-tab="tab-horarios-config"
+              data-super-label="Horarios, WhatsApp y DNI"
+              class="super-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                </svg>
+                <span>Horarios, WhatsApp y DNI</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E] px-2 py-0.5 font-mono text-[11px] text-[#9A9AA6]">Config</span>
+            </button>
+
+            <button
+              type="button"
+              data-super-tab="tab-purga"
+              data-super-label={`Cierre Mensual (${cierresMensuales.length})`}
+              class="super-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+                </svg>
+                <span>Cierre Mensual y Reportes PDF</span>
+              </span>
+              <span class="rounded-md bg-[#0B0B0E] px-2 py-0.5 font-mono text-[11px] text-[#D4AF37]">{cierresMensuales.length}</span>
+            </button>
+
+            <button
+              type="button"
+              data-super-tab="tab-perfil"
+              data-super-label="Mi Perfil y Contraseña"
+              class="super-tab-btn mt-1 flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all"
+            >
+              <span class="flex items-center gap-2.5">
+                <svg class="h-4 w-4 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                </svg>
+                <span>Mi Perfil y Contraseña</span>
+              </span>
+              <span class="rounded-md bg-[#D4AF37]/15 px-2 py-0.5 font-mono text-[10px] font-bold text-[#D4AF37]">Cuenta</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-7xl px-3.5 py-5 sm:px-6">
+
+      <!-- =================================================================== -->
+      <!-- PANEL 1: DESBLOQUEO DE DÍAS Y HORARIOS EN CUADRADOS (EXCLUSIVO)     -->
+      <!-- =================================================================== -->
+      <section id="tab-desbloqueos" class="super-spa-panel space-y-5">
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+          <div class="mb-4">
+            <h2 class="font-serif text-lg font-bold text-[#F4F4F6] sm:text-xl">Desbloquear Días y Horarios de Descanso</h2>
+            <p class="text-xs text-[#9A9AA6]">
+              Cuando Gerencia o un Barbero bloquean un día o turno por error, aquí puedes liberarlo con un solo toque.
+            </p>
+          </div>
+
+          {todosBloqueos.length === 0 ? (
+            <div class="rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-10 text-center text-sm text-[#9A9AA6]">
+              No hay ningún día ni horario bloqueado en este momento.
+            </div>
+          ) : (
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {todosBloqueos.map((b) => (
+                <div class="flex flex-col justify-between gap-4 rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-4 shadow-md">
+                  <div>
+                    <div class="flex items-center justify-between border-b border-[#23232C] pb-2.5">
+                      <span class="font-mono text-xs font-bold text-[#D4AF37]">
+                        {b.fecha}
+                      </span>
+                      <span class="rounded-lg bg-[#F59E0B]/20 px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase text-[#F59E0B]">
+                        {b.bloque_horario === 'TODOS' ? 'DÍA COMPLETO' : formatHora12(b.bloque_horario)}
+                      </span>
+                    </div>
+                    <h3 class="mt-3 font-serif text-base font-bold text-[#F4F4F6]">
+                      {b.perfiles_staff?.nombre_visible || 'Trabajador'}
+                    </h3>
+                    <p class="mt-1 text-xs text-[#9A9AA6]">Motivo: {b.motivo || 'Descanso'}</p>
+                  </div>
+
+                  <button
+                    type="button"
+                    class="unlock-schedule-btn inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-xl bg-[#10B981] py-2.5 text-xs font-bold uppercase tracking-wider text-[#0B0B0E] shadow-md transition-transform active:scale-95"
+                    data-bloqueo-id={b.id}
+                  >
+                    <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                    <span>Desbloquear Ahora</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 2: PERSONAL EN CUADRADOS (EDITAR NOMBRE, CLAVE, BAJA, BORRAR) -->
+      <!-- =================================================================== -->
+      <section id="tab-staff" class="super-spa-panel hidden space-y-5">
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+          <div class="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+            <div>
+              <h2 class="font-serif text-lg font-bold text-[#F4F4F6] sm:text-xl">Personal de la Barbería (Gerencia y Barberos)</h2>
+              <p class="text-xs text-[#9A9AA6]">
+                Edita el nombre público del Gerente o Barberos, cámbiales la clave, dalos de baja o elimínalos permanentemente.
+              </p>
+            </div>
+            <button
+              type="button"
+              id="open-new-staff-btn"
+              class="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl bg-[#D4AF37] px-5 py-2.5 text-xs font-bold uppercase tracking-wider text-[#0B0B0E] shadow-md active:scale-95"
+            >
+              <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <span>Nuevo Trabajador</span>
+            </button>
+          </div>
+
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {allStaff.map((st) => (
+              <div class="flex flex-col justify-between rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-4 shadow-md">
+                <div>
+                  <div class="flex items-center justify-between border-b border-[#23232C] pb-3">
+                    <div class="flex items-center gap-2.5">
+                      <div class="flex h-10 w-10 items-center justify-center rounded-full border border-[#D4AF37]/40 bg-[#141419] font-serif text-xs font-bold text-[#D4AF37]">
+                        {st.nombre_visible.slice(0, 2).toUpperCase()}
+                      </div>
+                      <div>
+                        <h3 class="font-serif text-base font-bold text-[#F4F4F6]">{st.nombre_visible}</h3>
+                        <span class="font-mono text-[10px] font-bold uppercase text-[#D4AF37]">
+                          {st.rol === 'owner' ? 'Gerencia + Barbero' : 'Barbero'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <span class={`rounded-lg px-2.5 py-1 text-[10px] font-bold uppercase ${st.activo ? 'bg-[#10B981]/20 text-[#10B981]' : 'bg-[#EF4444]/20 text-[#EF4444]'}`}>
+                      {st.activo ? 'Activo' : 'De Baja'}
+                    </span>
+                  </div>
+
+                  <!-- Botón Táctil: ¿Atiende Cortes en la Web? -->
+                  <div class="my-3.5">
+                    <span class="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#9A9AA6]">
+                      Servicio de Barbería en Web:
+                    </span>
+                    <button
+                      type="button"
+                      class={`toggle-cortes-btn flex min-h-[42px] w-full items-center justify-between rounded-xl border px-3.5 py-2 text-xs font-bold transition-all active:scale-95 ${
+                        st.atiende_cortes
+                          ? 'border-[#10B981]/50 bg-[#10B981]/15 text-[#10B981]'
+                          : 'border-[#23232C] bg-[#141419] text-[#9A9AA6]'
+                      }`}
+                      data-id={st.id}
+                      data-atiende={st.atiende_cortes ? 'true' : 'false'}
+                    >
+                      <span class="flex items-center gap-2">
+                        <span class={`h-2 w-2 rounded-full ${st.atiende_cortes ? 'bg-[#10B981]' : 'bg-[#9A9AA6]'}`}></span>
+                        <span>{st.atiende_cortes ? 'Sí hace cortes (Visible)' : 'No hace cortes (Oculto)'}</span>
+                      </span>
+                      <span class="underline">Cambiar</span>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Botones de Acción del Trabajador (4 botones táctiles en cuadrícula 2x2) -->
+                <div class="grid grid-cols-2 gap-2 border-t border-[#23232C] pt-3">
+                  <button
+                    type="button"
+                    class="open-edit-name-btn inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-[#D4AF37]/40 bg-[#D4AF37]/10 px-3 py-2 text-xs font-bold text-[#D4AF37] active:scale-95"
+                    data-id={st.id}
+                    data-nombre={st.nombre_visible}
+                  >
+                    <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    <span>Editar Nombre</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="open-reset-pass-btn inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-[#23232C] bg-[#141419] px-3 py-2 text-xs font-bold text-[#F4F4F6] hover:border-[#D4AF37] active:scale-95"
+                    data-id={st.id}
+                    data-nombre={st.nombre_visible}
+                  >
+                    <svg class="h-3.5 w-3.5 shrink-0 text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                    <span>Cambiar Clave</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="toggle-staff-active-btn min-h-[40px] rounded-xl border border-[#23232C] bg-[#141419] px-3 py-2 text-xs font-bold text-[#9A9AA6] hover:text-[#F4F4F6] active:scale-95"
+                    data-id={st.id}
+                    data-activo={st.activo ? 'true' : 'false'}
+                  >
+                    {st.activo ? 'Dar de Baja' : 'Reactivar'}
+                  </button>
+
+                  <button
+                    type="button"
+                    class="delete-staff-btn inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3 py-2 text-xs font-bold text-[#EF4444] active:scale-95"
+                    data-id={st.id}
+                    data-nombre={st.nombre_visible}
+                  >
+                    <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                    <span>Eliminar</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 3: LIMPIAR PRUEBAS DE BARBEROS Y BORRAR HISTORIAL DE CLIENTES -->
+      <!-- =================================================================== -->
+      <section id="tab-pruebas" class="super-spa-panel hidden space-y-6">
+        <!-- Cabecera con botón para limpiar todas las pruebas de golpe -->
+        <div class="rounded-2xl border border-[#EF4444]/30 bg-[#141419] p-4 sm:p-6">
+          <div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+            <div>
+              <h2 class="font-serif text-lg font-bold text-[#F4F4F6] sm:text-xl">
+                Limpiar Citas y Clientes de Prueba
+              </h2>
+              <p class="mt-1 text-xs leading-relaxed text-[#9A9AA6]">
+                Si los barberos o el gerente agendaron turnos de prueba, aquí puedes borrar el historial de un cliente específico o limpiar todas las pruebas para evitar confusiones en sus paneles.
+              </p>
+            </div>
+            {(historialClientes.length > 0 || todasCitas.length > 0) && (
+              <button
+                type="button"
+                id="wipe-all-tests-btn"
+                class="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-xl border border-[#EF4444] bg-[#EF4444]/15 px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-[#EF4444] hover:bg-[#EF4444] hover:text-[#0B0B0E] active:scale-95"
+              >
+                <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+                <span>Borrar Todas las Pruebas ({historialClientes.length})</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <!-- 1. Historial de Clientes Registrados (Borrar por Cliente / DNI) -->
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+          <h3 class="mb-1 font-serif text-base font-bold text-[#F4F4F6] sm:text-lg">
+            Clientes en el Historial ({historialClientes.length})
+          </h3>
+          <p class="mb-4 text-xs text-[#9A9AA6]">
+            Al tocar <strong>"Borrar Cliente y Pruebas"</strong>, se eliminan tanto sus citas como su registro en el apartado "Clientes" del Barbero y de Gerencia.
+          </p>
+
+          {historialClientes.length === 0 ? (
+            <div class="rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-8 text-center text-xs text-[#9A9AA6]">
+              El historial de clientes está completamente limpio.
+            </div>
+          ) : (
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {historialClientes.map((cl) => (
+                <div class="flex flex-col justify-between rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-4 shadow-md">
+                  <div>
+                    <div class="flex items-start justify-between gap-2 border-b border-[#23232C] pb-3">
+                      <div>
+                        <h4 class="font-serif text-base font-bold text-[#F4F4F6]">{cl.nombre_completo}</h4>
+                        <p class="font-mono text-xs text-[#9A9AA6]">DNI: {cl.dni} • Cel: {cl.telefono}</p>
+                      </div>
+                      <span class="rounded-lg bg-[#D4AF37]/15 px-2.5 py-1 font-mono text-[10px] font-bold text-[#D4AF37]">
+                        {cl.ultima_fecha}
+                      </span>
+                    </div>
+
+                    <div class="my-3.5 grid grid-cols-3 gap-2 text-center text-xs">
+                      <div class="rounded-xl bg-[#141419] p-2">
+                        <span class="block font-mono font-bold text-[#D4AF37]">{cl.total_agendadas}</span>
+                        <span class="text-[10px] text-[#9A9AA6]">Agendadas</span>
+                      </div>
+                      <div class="rounded-xl bg-[#141419] p-2">
+                        <span class="block font-mono font-bold text-[#10B981]">{cl.total_asistidas}</span>
+                        <span class="text-[10px] text-[#9A9AA6]">Asistieron</span>
+                      </div>
+                      <div class="rounded-xl bg-[#141419] p-2">
+                        <span class="block font-mono font-bold text-[#EF4444]">{cl.total_canceladas}</span>
+                        <span class="text-[10px] text-[#9A9AA6]">Cancelaron</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    class="delete-test-client-btn inline-flex min-h-[42px] w-full items-center justify-center gap-1.5 rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3 py-2 text-xs font-bold text-[#EF4444] hover:bg-[#EF4444] hover:text-[#0B0B0E] active:scale-95"
+                    data-dni={cl.dni}
+                    data-nombre={cl.nombre_completo}
+                  >
+                    <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+                    <span>Borrar Cliente y sus Pruebas</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <!-- 2. Citas Individuales Activas (Borrar una cita específica de prueba) -->
+        {todasCitas.length > 0 && (
+          <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+            <h3 class="mb-1 font-serif text-base font-bold text-[#F4F4F6] sm:text-lg">
+              Citas Registradas ({todasCitas.length})
+            </h3>
+            <p class="mb-4 text-xs text-[#9A9AA6]">
+              Si solo deseas borrar una cita específica de prueba sin borrar todo el cliente, elimínala aquí y su contador se ajustará automáticamente:
+            </p>
+
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {todasCitas.map((ct) => (
+                <div class="flex flex-col justify-between rounded-xl border border-[#23232C] bg-[#0B0B0E] p-3.5">
+                  <div>
+                    <div class="flex items-center justify-between text-xs">
+                      <span class="font-mono font-bold text-[#D4AF37]">
+                        {ct.fecha} • {formatHora12(ct.bloque_horario)}
+                      </span>
+                      <span class="rounded bg-[#141419] px-2 py-0.5 text-[10px] font-bold uppercase text-[#9A9AA6]">
+                        {ct.estado}
+                      </span>
+                    </div>
+                    <p class="mt-2 font-serif text-sm font-bold text-[#F4F4F6]">{ct.nombre_completo}</p>
+                    <p class="font-mono text-[11px] text-[#9A9AA6]">
+                      DNI: {ct.dni} • Barbero: {ct.perfiles_staff?.nombre_visible || 'Barbero'}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    class="delete-single-test-cita-btn mt-3 inline-flex min-h-[38px] w-full items-center justify-center gap-1.5 rounded-lg border border-[#EF4444]/40 bg-[#EF4444]/10 px-3 py-1.5 text-xs font-bold text-[#EF4444] active:scale-95"
+                    data-cita-id={ct.id}
+                    data-nombre={ct.nombre_completo}
+                  >
+                    <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+                    <span>Borrar esta Cita</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 4: CATÁLOGO DE 3 SERVICIOS Y TARIFAS (10, 12 Y 15 SOLES)      -->
+      <!-- =================================================================== -->
+      <section id="tab-servicios" class="super-spa-panel hidden space-y-5">
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+          <h2 class="font-serif text-lg font-bold text-[#F4F4F6] sm:text-xl">Los 3 Servicios y Tarifas</h2>
+          <p class="mt-1 mb-5 text-xs text-[#9A9AA6]">
+            Modifica nombres, precios en Soles y la descripción de cada servicio.
+          </p>
+
+          <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+            {allServicios.map((srv) => (
+              <form class="service-edit-form flex flex-col justify-between rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-4 space-y-3.5" data-id={srv.id}>
+                <div class="space-y-3">
+                  <div class="flex items-center justify-between border-b border-[#23232C] pb-2">
+                    <span class="font-mono text-xs font-bold uppercase text-[#D4AF37]">Servicio #{srv.id}</span>
+                    <label class="flex items-center gap-2 text-xs font-bold text-[#F4F4F6]">
+                      <input type="checkbox" name="activo" checked={srv.activo} class="h-4 w-4 accent-[#D4AF37]" />
+                      <span>Activo</span>
+                    </label>
+                  </div>
+
+                  <div>
+                    <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Nombre</label>
+                    <input
+                      type="text"
+                      name="nombre"
+                      value={srv.nombre}
+                      required
+                      class="w-full rounded-xl border border-[#23232C] bg-[#141419] px-3.5 py-2.5 text-xs font-bold text-[#F4F4F6]"
+                    />
+                  </div>
+
+                  <div>
+                    <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Precio (S/)</label>
+                    <input
+                      type="number"
+                      step="0.50"
+                      name="precio"
+                      value={srv.precio}
+                      required
+                      class="w-full rounded-xl border border-[#23232C] bg-[#141419] px-3.5 py-2.5 font-mono text-sm font-bold text-[#D4AF37]"
+                    />
+                  </div>
+
+                  <div>
+                    <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Descripción</label>
+                    <textarea
+                      name="descripcion"
+                      rows="3"
+                      class="w-full rounded-xl border border-[#23232C] bg-[#141419] px-3.5 py-2.5 text-xs text-[#F4F4F6]"
+                    >{srv.descripcion}</textarea>
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  class="min-h-[44px] w-full rounded-xl bg-[#D4AF37] py-2.5 text-xs font-bold uppercase tracking-wider text-[#0B0B0E] active:scale-95"
+                >
+                  Guardar Cambios
+                </button>
+              </form>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 5: HORARIOS (1H 10M), WHATSAPP Y LIBERACIÓN DNI 14 DÍAS       -->
+      <!-- =================================================================== -->
+      <section id="tab-horarios-config" class="super-spa-panel hidden space-y-6">
+        <div class="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          <!-- Configuración de Horarios y WhatsApp -->
+          <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6 lg:col-span-7">
+            <h2 class="font-serif text-lg font-bold text-[#F4F4F6]">Horarios de Atención (1h 10m) y WhatsApp</h2>
+            <p class="mt-1 mb-4 text-xs text-[#9A9AA6]">
+              Lunes a Viernes (4:30 PM – 10:00 PM) y Sábado a Domingo (3:00 PM – 7:00 PM).
+            </p>
+
+            <form id="super-config-form" class="space-y-4">
+              <div>
+                <label class="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+                  Turnos Lunes a Viernes (Formato 24h separados por coma)
+                </label>
+                <input
+                  type="text"
+                  id="cfg-bloques-lv"
+                  value={(barberiaConfig.bloques_lv || ['16:30', '17:40', '18:50', '20:00', '21:10']).join(', ')}
+                  class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 font-mono text-xs text-[#F4F4F6]"
+                />
+              </div>
+
+              <div>
+                <label class="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#D4AF37]">
+                  Turnos Sábado y Domingo (Última reserva 7:00 PM = 19:00)
+                </label>
+                <input
+                  type="text"
+                  id="cfg-bloques-sd"
+                  value={(barberiaConfig.bloques_sd || ['15:00', '16:10', '17:20', '19:00']).join(', ')}
+                  class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 font-mono text-xs text-[#F4F4F6]"
+                />
+              </div>
+
+              <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">WhatsApp Clientes</label>
+                  <input
+                    type="text"
+                    id="cfg-wa-clientes"
+                    value={barberiaConfig.whatsapp_clientes}
+                    class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 font-mono text-xs text-[#F4F4F6]"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">WhatsApp Soporte</label>
+                  <input
+                    type="text"
+                    id="cfg-wa-soporte"
+                    value={barberiaConfig.whatsapp_soporte}
+                    class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 font-mono text-xs text-[#F4F4F6]"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Espera por DNI (Días)</label>
+                  <input
+                    type="number"
+                    id="cfg-cooldown"
+                    value={barberiaConfig.dias_cooldown ?? 14}
+                    class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 font-mono text-xs text-[#D4AF37]"
+                  />
+                </div>
+              </div>
+
+              <div id="cfg-feedback" class="hidden rounded-xl border px-3.5 py-2.5 text-xs"></div>
+
+              <button
+                type="submit"
+                class="min-h-[46px] w-full rounded-xl bg-[#D4AF37] py-3 text-xs font-bold uppercase tracking-wider text-[#0B0B0E] active:scale-95"
+              >
+                Guardar Horarios y WhatsApp
+              </button>
+            </form>
+          </div>
+
+          <!-- Liberación de DNI Anti-Spam (14 días) -->
+          <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6 lg:col-span-5">
+            <h2 class="font-serif text-lg font-bold text-[#F4F4F6]">Liberar DNI (Regla de 14 Días)</h2>
+            <p class="mt-1 mb-4 text-xs text-[#9A9AA6]">
+              Ingresa el DNI de un cliente para permitirle volver a reservar antes de los 14 días.
+            </p>
+
+            <form id="dni-search-form" class="flex gap-2">
+              <input
+                type="text"
+                id="search-dni-input"
+                maxlength="8"
+                inputmode="numeric"
+                placeholder="DNI de 8 dígitos"
+                class="flex-1 rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 font-mono text-xs text-[#F4F4F6]"
+              />
+              <button type="submit" class="min-h-[44px] rounded-xl bg-[#D4AF37] px-5 py-2.5 text-xs font-bold text-[#0B0B0E]">
+                Buscar
+              </button>
+            </form>
+
+            <div id="dni-search-results" class="mt-4 hidden space-y-3"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 6: CIERRE MENSUAL, PURGA Y DESCARGA DE PDF PARA GERENCIA      -->
+      <!-- =================================================================== -->
+      <section id="tab-purga" class="super-spa-panel hidden space-y-6">
+        <div class="rounded-2xl border border-[#D4AF37]/40 bg-[#141419] p-5 sm:p-6">
+          <div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+            <div>
+              <h2 class="font-serif text-lg font-bold text-[#F4F4F6]">Cierre Contable Mensual y Limpieza de Base de Datos</h2>
+              <p class="mt-1 text-xs leading-relaxed text-[#9A9AA6]">
+                Al ejecutar el cierre: <strong>1)</strong> Se guarda el reporte contable completo del mes aquí abajo para descargar en PDF, <strong>2)</strong> Se limpian las citas y bloqueos antiguos para no sobrecargar la base de datos, y <strong>3)</strong> El <strong>Historial de Clientes</strong> (veces que agendaron, asistieron y cancelaron) queda intacto de forma permanente.
+              </p>
+            </div>
+            <button
+              type="button"
+              id="trigger-purge-btn"
+              class="min-h-[46px] shrink-0 rounded-xl bg-[#D4AF37] px-6 py-3 text-xs font-bold uppercase tracking-wider text-[#0B0B0E] shadow-lg active:scale-95"
+            >
+              Ejecutar Cierre y Limpieza Ahora
+            </button>
+          </div>
+        </div>
+
+        <!-- Tarjeta de Respaldo Completo de Base de Datos -->
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-5 sm:p-6">
+          <div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="flex h-6 w-6 items-center justify-center rounded-lg bg-[#10B981]/20 text-[#10B981]">
+                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                </span>
+                <h3 class="font-serif text-base font-bold text-[#F4F4F6]">Copia de Seguridad de la Base de Datos</h3>
+              </div>
+              <p class="mt-1 text-xs leading-relaxed text-[#9A9AA6]">
+                Descarga un respaldo integral e instantáneo con todas las tablas: citas, personal, servicios, configuraciones e historial de clientes en formato JSON estructurado para archivo seguro.
+              </p>
+            </div>
+            <a
+              href="/api/superadmin/backup"
+              class="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-xl border border-[#10B981] bg-[#10B981]/15 px-5 py-2.5 text-xs font-bold uppercase tracking-wider text-[#10B981] hover:bg-[#10B981] hover:text-[#0B0B0E] active:scale-95 transition-all"
+            >
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Descargar Copia de Seguridad</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- Historial de Reportes Mensuales con Botón Descargar PDF -->
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-4 sm:p-6">
+          <h3 class="mb-4 font-serif text-base font-bold text-[#F4F4F6] sm:text-lg">
+            Reportes Mensuales Guardados ({cierresMensuales.length}) — Descargables en PDF para Gerencia
+          </h3>
+
+          {cierresMensuales.length === 0 ? (
+            <div class="rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-8 text-center text-xs text-[#9A9AA6]">
+              Aún no se ha ejecutado ningún cierre mensual. Cuando ejecutes el cierre, aparecerá aquí con su botón para descargar en PDF.
+            </div>
+          ) : (
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {cierresMensuales.map((cm) => (
+                <div class="flex flex-col justify-between rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-4 shadow-md">
+                  <div>
+                    <div class="flex items-center justify-between border-b border-[#23232C] pb-3">
+                      <div>
+                        <span class="text-[10px] font-bold uppercase tracking-wider text-[#9A9AA6]">Periodo Mensual</span>
+                        <h4 class="font-mono text-lg font-bold text-[#D4AF37]">{cm.mes_anio}</h4>
+                      </div>
+                      <span class="rounded-lg bg-[#10B981]/15 px-2.5 py-1 font-mono text-xs font-bold text-[#10B981]">
+                        S/ {Number(cm.ingresos_totales || 0).toFixed(2)}
+                      </span>
+                    </div>
+
+                    <div class="my-3.5 grid grid-cols-3 gap-2 text-center text-xs">
+                      <div class="rounded-xl bg-[#141419] p-2">
+                        <span class="block font-mono font-bold text-[#10B981]">{cm.citas_completadas}</span>
+                        <span class="text-[10px] text-[#9A9AA6]">Asistieron</span>
+                      </div>
+                      <div class="rounded-xl bg-[#141419] p-2">
+                        <span class="block font-mono font-bold text-[#EF4444]">{cm.citas_canceladas}</span>
+                        <span class="text-[10px] text-[#9A9AA6]">Canceladas</span>
+                      </div>
+                      <div class="rounded-xl bg-[#141419] p-2">
+                        <span class="block font-mono font-bold text-[#F59E0B]">{cm.citas_no_asistio}</span>
+                        <span class="text-[10px] text-[#9A9AA6]">Faltas</span>
+                      </div>
+                    </div>
+
+                    <p class="text-[11px] text-[#9A9AA6]">
+                      Promedio Semanal: <strong class="font-mono text-[#F4F4F6]">S/ {Number(cm.promedio_semanal || 0).toFixed(2)}</strong> • Fiabilidad: <strong class="font-mono text-[#10B981]">{cm.tasa_fiabilidad}%</strong>
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    class="download-closure-pdf-btn mt-4 inline-flex min-h-[42px] w-full items-center justify-center gap-2 rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 px-4 py-2.5 text-xs font-bold text-[#D4AF37] hover:bg-[#D4AF37] hover:text-[#0B0B0E] active:scale-95"
+                    data-cierre={JSON.stringify(cm)}
+                  >
+                    <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/></svg>
+                    <span>Descargar PDF para Gerencia</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <!-- =================================================================== -->
+      <!-- PANEL 7: MI PERFIL Y SEGURIDAD DE SOPORTE                           -->
+      <!-- =================================================================== -->
+      <section id="tab-perfil" class="super-spa-panel hidden space-y-6">
+        <div class="rounded-2xl border border-[#23232C] bg-[#141419] p-5 sm:p-6 shadow-xl">
+          <div class="mb-5 flex flex-col gap-4 border-b border-[#23232C] pb-5 sm:flex-row sm:items-center sm:justify-between">
+            <div class="flex items-center gap-3.5">
+              <div class="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-[#D4AF37]/50 bg-[#0B0B0E] font-serif text-lg font-bold text-[#D4AF37] shadow-inner">
+                {nombreVisible.slice(0, 2).toUpperCase()}
+              </div>
+              <div>
+                <div class="flex items-center gap-2">
+                  <h2 class="font-serif text-lg font-bold text-[#F4F4F6] sm:text-xl">{nombreVisible}</h2>
+                  <span class="rounded-md border border-[#D4AF37]/40 bg-[#D4AF37]/15 px-2 py-0.5 text-[10px] font-bold uppercase text-[#D4AF37]">
+                    Soporte Maestro
+                  </span>
+                </div>
+                <p class="font-mono text-xs text-[#9A9AA6]">{currentUserEmail}</p>
+              </div>
+            </div>
+            <div class="rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-2 text-left sm:text-right">
+              <span class="block text-[10px] font-bold uppercase text-[#9A9AA6]">Rol de Acceso</span>
+              <span class="font-mono text-xs font-bold text-[#10B981]">superadmin</span>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <!-- 1. CAMBIO DE CONTRASEÑA DIRECTO -->
+            <div class="rounded-2xl border border-[#D4AF37]/40 bg-[#0B0B0E] p-5 shadow-lg">
+              <div class="mb-4 flex items-center gap-2.5 border-b border-[#23232C] pb-3">
+                <span class="flex h-7 w-7 items-center justify-center rounded-lg bg-[#D4AF37]/15 text-[#D4AF37]">
+                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                  </svg>
+                </span>
+                <div>
+                  <h3 class="font-serif text-sm font-bold text-[#F4F4F6]">Cambiar Mi Contraseña</h3>
+                  <p class="text-[11px] text-[#9A9AA6]">Actualiza tu clave de acceso a esta consola</p>
+                </div>
+              </div>
+
+              <form id="soporte-my-pass-form" data-my-user-id={currentUserId} class="space-y-4">
+                <div>
+                  <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Nueva Contraseña</label>
+                  <div class="relative">
+                    <input
+                      type="password"
+                      id="smp-new-pass"
+                      required
+                      minlength="6"
+                      placeholder="Mínimo 6 caracteres"
+                      class="w-full rounded-xl border border-[#23232C] bg-[#141419] px-3.5 py-3 pr-10 text-xs text-[#F4F4F6] focus:border-[#D4AF37] focus:outline-none"
+                    />
+                    <button type="button" class="toggle-eye-btn absolute right-3 top-1/2 -translate-y-1/2 text-[#9A9AA6] hover:text-[#D4AF37]" data-target="smp-new-pass" aria-label="Mostrar u ocultar contraseña">
+                      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Confirmar Nueva Contraseña</label>
+                  <div class="relative">
+                    <input
+                      type="password"
+                      id="smp-confirm-pass"
+                      required
+                      minlength="6"
+                      placeholder="Repite la nueva contraseña"
+                      class="w-full rounded-xl border border-[#23232C] bg-[#141419] px-3.5 py-3 pr-10 text-xs text-[#F4F4F6] focus:border-[#D4AF37] focus:outline-none"
+                    />
+                    <button type="button" class="toggle-eye-btn absolute right-3 top-1/2 -translate-y-1/2 text-[#9A9AA6] hover:text-[#D4AF37]" data-target="smp-confirm-pass" aria-label="Mostrar u ocultar contraseña">
+                      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <div id="smp-feedback" class="hidden rounded-xl border px-3.5 py-2.5 text-xs"></div>
+
+                <button
+                  type="submit"
+                  id="smp-submit-btn"
+                  class="min-h-[46px] w-full rounded-xl bg-[#D4AF37] py-3 text-xs font-bold uppercase tracking-wider text-[#0B0B0E] shadow-lg active:scale-[0.99] transition-all"
+                >
+                  Actualizar Mi Contraseña
+                </button>
+              </form>
+            </div>
+
+            <!-- 2. EDITAR NOMBRE DE VISUALIZACIÓN DE SOPORTE -->
+            <div class="rounded-2xl border border-[#23232C] bg-[#0B0B0E] p-5 shadow-lg">
+              <div class="mb-4 flex items-center gap-2.5 border-b border-[#23232C] pb-3">
+                <span class="flex h-7 w-7 items-center justify-center rounded-lg bg-[#D4AF37]/15 text-[#D4AF37]">
+                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                  </svg>
+                </span>
+                <div>
+                  <h3 class="font-serif text-sm font-bold text-[#F4F4F6]">Nombre Visible de Soporte</h3>
+                  <p class="text-[11px] text-[#9A9AA6]">Nombre que se muestra en tus reportes y panel</p>
+                </div>
+              </div>
+
+              <form id="soporte-my-name-form" data-my-user-id={currentUserId} class="space-y-4">
+                <div>
+                  <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Nombre Público</label>
+                  <input
+                    type="text"
+                    id="smn-name"
+                    required
+                    value={nombreVisible}
+                    class="w-full rounded-xl border border-[#23232C] bg-[#141419] px-3.5 py-3 text-xs font-bold text-[#F4F4F6] focus:border-[#D4AF37] focus:outline-none"
+                  />
+                </div>
+
+                <div id="smn-feedback" class="hidden rounded-xl border px-3.5 py-2.5 text-xs"></div>
+
+                <button
+                  type="submit"
+                  id="smn-submit-btn"
+                  class="min-h-[46px] w-full rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-3 text-xs font-bold uppercase tracking-wider text-[#D4AF37] hover:bg-[#D4AF37] hover:text-[#0B0B0E] active:scale-[0.99] transition-all"
+                >
+                  Guardar Nombre
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- MODAL TÁCTIL: CREAR NUEVO TRABAJADOR -->
+  <div id="new-staff-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+    <div class="w-full max-w-md rounded-2xl border border-[#23232C] bg-[#141419] p-5 shadow-2xl">
+      <div class="mb-4 flex items-center justify-between border-b border-[#23232C] pb-3">
+        <h3 class="font-serif text-base font-bold text-[#F4F4F6]">Nuevo Trabajador</h3>
+        <button type="button" id="close-new-staff" class="p-1.5 text-[#9A9AA6] hover:text-[#F4F4F6]" aria-label="Cerrar">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form id="new-staff-form" class="space-y-4">
+        <div>
+          <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Nombre</label>
+          <input type="text" id="ns-nombre" required placeholder="Ej: Diego Torres" class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 text-xs text-[#F4F4F6]" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Correo de Acceso</label>
+          <input type="email" id="ns-email" required placeholder="diego@barberialucas.com" class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 text-xs text-[#F4F4F6]" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Contraseña</label>
+          <div class="relative">
+            <input type="password" id="ns-password" required minlength="6" placeholder="Mínimo 6 caracteres" class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 pr-10 text-xs text-[#F4F4F6]" />
+            <button type="button" class="toggle-eye-btn absolute right-3 top-1/2 -translate-y-1/2 text-[#9A9AA6] hover:text-[#D4AF37]" data-target="ns-password" aria-label="Mostrar u ocultar contraseña">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Selección Táctil de Rol con Tarjetas -->
+        <div>
+          <label class="mb-1.5 block text-[10px] font-bold uppercase text-[#D4AF37]">Cargo en la Barbería</label>
+          <input type="hidden" id="ns-rol" value="barber" />
+          <div class="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              data-role-val="barber"
+              class="ns-role-card min-h-[44px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/20 p-2.5 text-xs font-bold text-[#D4AF37]"
+            >
+              Barbero
+            </button>
+            <button
+              type="button"
+              data-role-val="owner"
+              class="ns-role-card min-h-[44px] rounded-xl border border-[#23232C] bg-[#0B0B0E] p-2.5 text-xs font-bold text-[#F4F4F6]"
+            >
+              Gerencia
+            </button>
+          </div>
+        </div>
+
+        <button type="submit" class="min-h-[46px] w-full rounded-xl bg-[#D4AF37] py-3 text-xs font-bold uppercase text-[#0B0B0E]">
+          Crear Cuenta
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: EDITAR NOMBRE DEL PERSONAL O GERENTE -->
+  <div id="edit-name-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+    <div class="w-full max-w-md rounded-2xl border border-[#23232C] bg-[#141419] p-5 shadow-2xl">
+      <div class="mb-4 flex items-center justify-between border-b border-[#23232C] pb-3">
+        <h3 class="font-serif text-base font-bold text-[#F4F4F6]">Cambiar Nombre Público</h3>
+        <button type="button" id="close-edit-name" class="p-1.5 text-[#9A9AA6] hover:text-[#F4F4F6]" aria-label="Cerrar">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form id="edit-name-form" class="space-y-4">
+        <input type="hidden" id="en-user-id" />
+        <div>
+          <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Nombre que verán los clientes al reservar</label>
+          <input
+            type="text"
+            id="en-nuevo-nombre"
+            required
+            placeholder="Ej: Alejandro Vega"
+            class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 text-xs font-bold text-[#F4F4F6]"
+          />
+        </div>
+        <button type="submit" class="min-h-[46px] w-full rounded-xl bg-[#D4AF37] py-3 text-xs font-bold uppercase text-[#0B0B0E]">
+          Guardar Nuevo Nombre
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: CAMBIAR CONTRASEÑA -->
+  <div id="reset-pass-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+    <div class="w-full max-w-md rounded-2xl border border-[#23232C] bg-[#141419] p-5 shadow-2xl">
+      <div class="mb-4 flex items-center justify-between border-b border-[#23232C] pb-3">
+        <h3 id="rp-title" class="font-serif text-base font-bold text-[#F4F4F6]">Cambiar Clave</h3>
+        <button type="button" id="close-reset-pass" class="p-1.5 text-[#9A9AA6] hover:text-[#F4F4F6]" aria-label="Cerrar">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form id="reset-pass-form" class="space-y-4">
+        <input type="hidden" id="rp-user-id" />
+        <div>
+          <label class="mb-1 block text-[10px] font-bold uppercase text-[#9A9AA6]">Nueva Contraseña</label>
+          <div class="relative">
+            <input type="password" id="rp-new-pass" required minlength="6" placeholder="Nueva contraseña segura" class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-3.5 py-3 pr-10 text-xs text-[#F4F4F6]" />
+            <button type="button" class="toggle-eye-btn absolute right-3 top-1/2 -translate-y-1/2 text-[#9A9AA6] hover:text-[#D4AF37]" data-target="rp-new-pass" aria-label="Mostrar u ocultar contraseña">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <button type="submit" class="min-h-[46px] w-full rounded-xl bg-[#D4AF37] py-3 text-xs font-bold uppercase text-[#0B0B0E]">
+          Actualizar Contraseña
+        </button>
+      </form>
+    </div>
+  </div>
+</Layout>
+
+<script>
+  // 1. NAVEGACIÓN SPA CON MENÚ DESPLEGABLE Y PERSISTENCIA EN SESSIONSTORAGE
+  const tabBtns = document.querySelectorAll('.super-tab-btn');
+  const spaPanels = document.querySelectorAll('.super-spa-panel');
+  const superDropdownWrapper = document.getElementById('super-nav-dropdown-wrapper');
+  const superDropdownTrigger = document.getElementById('super-nav-dropdown-trigger');
+  const superDropdownMenu = document.getElementById('super-nav-dropdown-menu');
+  const superCurrentLabel = document.getElementById('super-nav-current-label');
+  const superChevron = document.getElementById('super-nav-chevron');
+
+  let isSuperDropdownOpen = false;
+
+  function openSuperDropdown() {
+    if (!superDropdownMenu) return;
+    isSuperDropdownOpen = true;
+    superDropdownMenu.classList.remove('hidden');
+    superDropdownMenu.classList.remove('nav-dropdown-closing');
+    superDropdownMenu.classList.add('nav-dropdown-opening');
+    superDropdownTrigger?.setAttribute('aria-expanded', 'true');
+    superChevron?.classList.add('rotate-180');
+  }
+
+  function closeSuperDropdown() {
+    if (!superDropdownMenu || !isSuperDropdownOpen) return;
+    isSuperDropdownOpen = false;
+    superDropdownMenu.classList.remove('nav-dropdown-opening');
+    superDropdownMenu.classList.add('nav-dropdown-closing');
+    superDropdownTrigger?.setAttribute('aria-expanded', 'false');
+    superChevron?.classList.remove('rotate-180');
+    setTimeout(() => {
+      if (!isSuperDropdownOpen) {
+        superDropdownMenu.classList.add('hidden');
+        superDropdownMenu.classList.remove('nav-dropdown-closing');
+      }
+    }, 160);
+  }
+
+  superDropdownTrigger?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!isSuperDropdownOpen) {
+      openSuperDropdown();
+    } else {
+      closeSuperDropdown();
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (superDropdownWrapper && !superDropdownWrapper.contains(e.target as Node)) {
+      closeSuperDropdown();
+    }
+  });
+
+  function activateSuperTab(target: string | null) {
+    if (!target) return;
+    tabBtns.forEach((b, idx) => {
+      const mtClass = idx === 0 ? '' : 'mt-1 ';
+      if (b.getAttribute('data-super-tab') === target) {
+        b.className = `${mtClass}super-tab-btn flex min-h-[42px] w-full items-center justify-between rounded-xl bg-[#D4AF37] px-3.5 py-2 text-xs font-bold text-[#0B0B0E] transition-all`;
+        if (superCurrentLabel) {
+          superCurrentLabel.textContent = b.getAttribute('data-super-label') || 'Soporte';
+        }
+      } else {
+        b.className = `${mtClass}super-tab-btn flex min-h-[42px] w-full items-center justify-between rounded-xl px-3.5 py-2 text-xs font-bold text-[#F4F4F6] hover:bg-[#0B0B0E] transition-all`;
+      }
+    });
+    spaPanels.forEach((p) => {
+      if (p.id === target) p.classList.remove('hidden');
+      else p.classList.add('hidden');
+    });
+    sessionStorage.setItem('super_active_tab', target);
+    closeSuperDropdown();
+  }
+
+  const savedSuperTab = sessionStorage.getItem('super_active_tab');
+  if (savedSuperTab && document.getElementById(savedSuperTab)) {
+    activateSuperTab(savedSuperTab);
+  }
+
+  tabBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      activateSuperTab(btn.getAttribute('data-super-tab'));
+    });
+  });
+
+  // 2. LOGOUT
+  document.getElementById('super-logout-btn')?.addEventListener('click', async () => {
+    sessionStorage.clear();
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.reload();
+  });
+
+  // Toggle ver/ocultar contraseña
+  document.querySelectorAll('.toggle-eye-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const inputId = btn.getAttribute('data-target');
+      const input = inputId ? (document.getElementById(inputId) as HTMLInputElement | null) : null;
+      if (input) {
+        input.type = input.type === 'password' ? 'text' : 'password';
+      }
+    });
+  });
+
+  // 3. DESBLOQUEAR HORARIOS / DÍAS (EXCLUSIVO SOPORTE)
+  document.querySelectorAll('.unlock-schedule-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const bloqueo_id = btn.getAttribute('data-bloqueo-id');
+      const res = await fetch('/api/superadmin/soporte', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'desbloquear_horario', bloqueo_id }),
+      });
+      if (res.ok) window.location.reload();
+    });
+  });
+
+  // 4. TOGGLE ATIENDE CORTES (BARBEROS Y GERENCIA)
+  document.querySelectorAll('.toggle-cortes-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const user_id = btn.getAttribute('data-id');
+      const currentBool = btn.getAttribute('data-atiende') === 'true';
+      const res = await fetch('/api/superadmin/staff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'toggle_atiende_cortes', user_id, atiende_cortes: !currentBool }),
+      });
+      if (res.ok) window.location.reload();
+    });
+  });
+
+  // Toggle Activo / Baja de Staff
+  document.querySelectorAll('.toggle-staff-active-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const user_id = btn.getAttribute('data-id');
+      const isAct = btn.getAttribute('data-activo') === 'true';
+      const res = await fetch('/api/superadmin/staff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'toggle_activo', user_id, activo: !isAct }),
+      });
+      if (res.ok) window.location.reload();
+    });
+  });
+
+  // Eliminar Trabajador Permanentemente
+  document.querySelectorAll('.delete-staff-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const user_id = btn.getAttribute('data-id');
+      const nombre = btn.getAttribute('data-nombre');
+      if (!confirm(`¿Estás seguro de ELIMINAR permanentemente a "${nombre}"? Esta acción borrará su acceso de la barbería.`)) return;
+      const res = await fetch('/api/superadmin/staff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'eliminar', user_id }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.exito) {
+        alert(data.error || 'No se pudo eliminar al trabajador.');
+        return;
+      }
+      window.location.reload();
+    });
+  });
+
+  // Modal Editar Nombre del Personal o Gerencia
+  const enModal = document.getElementById('edit-name-modal');
+  const enUserId = document.getElementById('en-user-id') as HTMLInputElement | null;
+  const enNuevoNombre = document.getElementById('en-nuevo-nombre') as HTMLInputElement | null;
+
+  document.querySelectorAll('.open-edit-name-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (enUserId) enUserId.value = btn.getAttribute('data-id') || '';
+      if (enNuevoNombre) enNuevoNombre.value = btn.getAttribute('data-nombre') || '';
+      enModal?.classList.remove('hidden');
+      enModal?.classList.add('flex');
+    });
+  });
+
+  document.getElementById('close-edit-name')?.addEventListener('click', () => {
+    enModal?.classList.add('hidden');
+    enModal?.classList.remove('flex');
+  });
+
+  document.getElementById('edit-name-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const res = await fetch('/api/superadmin/staff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accion: 'editar_nombre',
+        user_id: enUserId?.value,
+        nuevo_nombre: enNuevoNombre?.value.trim(),
+      }),
+    });
+    if (res.ok) window.location.reload();
+  });
+
+  // Modal Nuevo Personal
+  const nsModal = document.getElementById('new-staff-modal');
+  const nsRolInput = document.getElementById('ns-rol') as HTMLInputElement | null;
+  document.querySelectorAll('.ns-role-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.ns-role-card').forEach((c) => {
+        c.className = 'ns-role-card min-h-[44px] rounded-xl border border-[#23232C] bg-[#0B0B0E] p-2.5 text-xs font-bold text-[#F4F4F6]';
+      });
+      card.className = 'ns-role-card min-h-[44px] rounded-xl border border-[#D4AF37] bg-[#D4AF37]/20 p-2.5 text-xs font-bold text-[#D4AF37]';
+      if (nsRolInput) nsRolInput.value = card.getAttribute('data-role-val') || 'barber';
+    });
+  });
+
+  document.getElementById('open-new-staff-btn')?.addEventListener('click', () => {
+    nsModal?.classList.remove('hidden');
+    nsModal?.classList.add('flex');
+  });
+  document.getElementById('close-new-staff')?.addEventListener('click', () => {
+    nsModal?.classList.add('hidden');
+    nsModal?.classList.remove('flex');
+  });
+  document.getElementById('new-staff-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const nombre_visible = (document.getElementById('ns-nombre') as HTMLInputElement)?.value;
+    const email = (document.getElementById('ns-email') as HTMLInputElement)?.value;
+    const password = (document.getElementById('ns-password') as HTMLInputElement)?.value;
+    const nuevo_rol = nsRolInput?.value || 'barber';
+    const res = await fetch('/api/superadmin/staff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accion: 'crear', nombre_visible, email, password, nuevo_rol, atiende_cortes: true }),
+    });
+    if (res.ok) window.location.reload();
+  });
+
+  // Modal Reset Password
+  const rpModal = document.getElementById('reset-pass-modal');
+  const rpUserId = document.getElementById('rp-user-id') as HTMLInputElement | null;
+  document.querySelectorAll('.open-reset-pass-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (rpUserId) rpUserId.value = btn.getAttribute('data-id') || '';
+      const t = document.getElementById('rp-title');
+      if (t) t.textContent = `Cambiar Clave: ${btn.getAttribute('data-nombre')}`;
+      rpModal?.classList.remove('hidden');
+      rpModal?.classList.add('flex');
+    });
+  });
+  document.getElementById('close-reset-pass')?.addEventListener('click', () => {
+    rpModal?.classList.add('hidden');
+    rpModal?.classList.remove('flex');
+  });
+  document.getElementById('reset-pass-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const nueva_password = (document.getElementById('rp-new-pass') as HTMLInputElement)?.value;
+    const res = await fetch('/api/superadmin/staff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accion: 'reset_password', user_id: rpUserId?.value, nueva_password }),
+    });
+    if (res.ok) {
+      alert('Contraseña actualizada exitosamente.');
+      rpModal?.classList.add('hidden');
+      rpModal?.classList.remove('flex');
+    }
+  });
+
+  // 5. LIMPIAR PRUEBAS DE BARBEROS Y BORRAR HISTORIAL DE CLIENTES DE PRUEBA
+  document.querySelectorAll('.delete-test-client-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const dni = btn.getAttribute('data-dni');
+      const nombre = btn.getAttribute('data-nombre');
+      if (!confirm(`¿Seguro que deseas borrar el historial y todas las citas de prueba de "${nombre}" (DNI: ${dni})?`)) return;
+      const res = await fetch('/api/superadmin/soporte', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'eliminar_cliente_prueba', dni }),
+      });
+      if (res.ok) window.location.reload();
+    });
+  });
+
+  document.querySelectorAll('.delete-single-test-cita-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const cita_id = btn.getAttribute('data-cita-id');
+      const nombre = btn.getAttribute('data-nombre');
+      if (!confirm(`¿Deseas eliminar esta cita de prueba de "${nombre}"?`)) return;
+      const res = await fetch('/api/superadmin/soporte', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'eliminar_cita_prueba', cita_id }),
+      });
+      if (res.ok) window.location.reload();
+    });
+  });
+
+  document.getElementById('wipe-all-tests-btn')?.addEventListener('click', async () => {
+    if (!confirm('¿Estás seguro de BORRAR TODAS las citas y todo el historial de clientes de prueba? Los paneles de los barberos y gerencia quedarán limpios desde cero.')) return;
+    const res = await fetch('/api/superadmin/soporte', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accion: 'limpiar_todo_pruebas' }),
+    });
+    if (res.ok) window.location.reload();
+  });
+
+  // 6. EDITAR LOS 3 SERVICIOS
+  document.querySelectorAll('.service-edit-form').forEach((form) => {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const id = Number(form.getAttribute('data-id'));
+      const fd = new FormData(form as HTMLFormElement);
+      const res = await fetch('/api/superadmin/servicios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id,
+          nombre: fd.get('nombre'),
+          precio: Number(fd.get('precio')),
+          descripcion: fd.get('descripcion'),
+          activo: fd.get('activo') === 'on',
+        }),
+      });
+      if (res.ok) window.location.reload();
+    });
+  });
+
+  // 7. GUARDAR HORARIOS (L-V y S-D) Y CONFIGURACIÓN
+  document.getElementById('super-config-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fb = document.getElementById('cfg-feedback');
+    const bloques_lv = (document.getElementById('cfg-bloques-lv') as HTMLInputElement)?.value;
+    const bloques_sd = (document.getElementById('cfg-bloques-sd') as HTMLInputElement)?.value;
+    const whatsapp_clientes = (document.getElementById('cfg-wa-clientes') as HTMLInputElement)?.value;
+    const whatsapp_soporte = (document.getElementById('cfg-wa-soporte') as HTMLInputElement)?.value;
+    const dias_cooldown = Number((document.getElementById('cfg-cooldown') as HTMLInputElement)?.value || 14);
+
+    const res = await fetch('/api/superadmin/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bloques_lv, bloques_sd, whatsapp_clientes, whatsapp_soporte, dias_cooldown }),
+    });
+    const data = await res.json();
+    if (fb) {
+      fb.className = res.ok
+        ? 'rounded-xl border border-[#10B981]/40 bg-[#10B981]/10 px-3.5 py-2.5 text-xs text-[#10B981]'
+        : 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+      fb.textContent = data.mensaje || data.error;
+      fb.classList.remove('hidden');
+    }
+  });
+
+  // Helper para escapar HTML y prevenir XSS
+  function escapeHtml(str: any): string {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  // 8. BUSCAR Y LIBERAR DNI (COOLDOWN 14 DÍAS)
+  document.getElementById('dni-search-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const dni = (document.getElementById('search-dni-input') as HTMLInputElement)?.value.trim();
+    const box = document.getElementById('dni-search-results');
+    if (!dni || !box) return;
+
+    const res = await fetch('/api/superadmin/soporte', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accion: 'buscar_dni', dni }),
+    });
+    const data = await res.json();
+    box.classList.remove('hidden');
+
+    if (!data.citas || data.citas.length === 0) {
+      box.innerHTML = `<p class="rounded-xl border border-[#23232C] bg-[#0B0B0E] p-3.5 text-xs text-[#9A9AA6]">No se encontraron reservas para el DNI ${escapeHtml(dni)}.</p>`;
+      return;
+    }
+
+    const exento = data.exento_cooldown;
+    box.innerHTML = `
+      <div class="rounded-xl border border-[#23232C] bg-[#0B0B0E] p-4 space-y-3">
+        <p class="text-xs font-bold text-[#F4F4F6]">Cliente: ${escapeHtml(data.citas[0].nombre_completo)} (DNI: ${escapeHtml(dni)})</p>
+        <p class="text-[11px] text-[#9A9AA6]">Estado: <strong class="${exento ? 'text-[#10B981]' : 'text-[#D4AF37]'}">${exento ? 'LIBERADO (Puede reservar hoy)' : 'Con espera de 14 días activa'}</strong></p>
+        <button type="button" id="btn-toggle-dni" class="min-h-[42px] w-full rounded-xl bg-[#D4AF37] py-2.5 text-xs font-bold text-[#0B0B0E]">
+          ${exento ? 'Restaurar regla de 14 días' : 'Liberar DNI para que reserve hoy'}
+        </button>
+      </div>
+    `;
+
+    document.getElementById('btn-toggle-dni')?.addEventListener('click', async () => {
+      await fetch('/api/superadmin/soporte', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'toggle_exento_cooldown', dni, exento: !exento }),
+      });
+      window.location.reload();
+    });
+  });
+
+  // 9. CIERRE Y PURGA MANUAL
+  document.getElementById('trigger-purge-btn')?.addEventListener('click', async () => {
+    if (!confirm('¿Confirmas ejecutar el cierre contable del mes? Se guardará el reporte descargable en PDF, se limpiarán las citas pasadas y se conservará el historial de clientes.')) return;
+    const res = await fetch('/api/superadmin/soporte', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accion: 'ejecutar_cierre_y_purga' }),
+    });
+    if (res.ok) window.location.reload();
+  });
+
+  // 10. GENERAR Y DESCARGAR REPORTE PDF DE CIERRE MENSUAL PARA GERENCIA
+  document.querySelectorAll('.download-closure-pdf-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const raw = btn.getAttribute('data-cierre');
+      if (!raw) return;
+      const cm = JSON.parse(raw);
+      const barberos = Array.isArray(cm.detalle_barberos_json) ? cm.detalle_barberos_json : [];
+      const servicios = Array.isArray(cm.detalle_servicios_json) ? cm.detalle_servicios_json : [];
+
+      const win = window.open('', '_blank', 'width=850,height=900');
+      if (!win) {
+        alert('Por favor permite las ventanas emergentes para descargar el PDF.');
+        return;
+      }
+
+      const rowsBarberos = barberos
+        .map(
+          (b: any) => {
+            const fallidas = b.fallidas ?? ((b.canceladas ?? 0) + (b.no_asistio ?? 0));
+            const generado = b.generado ?? b.ingresos ?? 0;
+            return `
+          <tr>
+            <td>${escapeHtml(b.barbero || 'Barbero')}</td>
+            <td style="text-align:center">${Number(b.completadas ?? 0)}</td>
+            <td style="text-align:center">${Number(fallidas)}</td>
+            <td style="text-align:right;font-weight:bold">S/ ${Number(generado).toFixed(2)}</td>
+          </tr>`;
+          }
+        )
+        .join('');
+
+      const rowsServicios = servicios
+        .map(
+          (s: any) => {
+            const cantidad = s.cortes ?? s.cantidad ?? 0;
+            return `
+          <tr>
+            <td>${escapeHtml(s.servicio || 'Servicio')}</td>
+            <td style="text-align:center">${Number(cantidad)}</td>
+            <td style="text-align:right;font-weight:bold">S/ ${Number(s.recaudado ?? 0).toFixed(2)}</td>
+          </tr>`;
+          }
+        )
+        .join('');
+
+      const safeMesAnio = escapeHtml(cm.mes_anio);
+      const fechaCierreStr = new Date(cm.created_at || cm.ejecutado_en || Date.now()).toLocaleDateString('es-PE');
+
+      win.document.write(`
+        <!DOCTYPE html>
+        <html lang="es">
+        <head>
+          <meta charset="UTF-8" />
+          <title>Reporte Mensual ${safeMesAnio} - Barbería Lucas</title>
+          <style>
+            body { font-family: system-ui, -apple-system, sans-serif; color: #111; padding: 36px; max-width: 780px; margin: 0 auto; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #D4AF37; padding-bottom: 16px; margin-bottom: 24px; }
+            .title { font-size: 22px; font-weight: 800; letter-spacing: 0.04em; margin: 0; }
+            .subtitle { font-size: 12px; color: #555; margin-top: 4px; }
+            .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 28px; }
+            .kpi { border: 1px solid #ddd; border-radius: 10px; padding: 14px; background: #fafafa; }
+            .kpi-label { font-size: 10px; text-transform: uppercase; color: #666; font-weight: 700; }
+            .kpi-val { font-size: 20px; font-weight: 800; margin-top: 6px; color: #111; }
+            h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #eee; padding-bottom: 8px; margin-top: 24px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+            th, td { border-bottom: 1px solid #e5e5e5; padding: 10px 8px; text-align: left; }
+            th { background: #f4f4f6; font-size: 11px; text-transform: uppercase; }
+            .footer { margin-top: 40px; font-size: 11px; color: #666; text-align: center; border-top: 1px solid #eee; padding-top: 16px; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div>
+              <h1 class="title">BARBERÍA LUCAS</h1>
+              <p class="subtitle">Reporte Contable de Cierre Mensual — Periodo: <strong>${safeMesAnio}</strong></p>
+            </div>
+            <div style="text-align:right;font-size:12px;color:#444;">
+              Generado desde Soporte<br/>
+              Fecha Cierre: ${fechaCierreStr}
+            </div>
+          </div>
+
+          <div class="kpis">
+            <div class="kpi">
+              <div class="kpi-label">Ingresos Totales</div>
+              <div class="kpi-val">S/ ${Number(cm.ingresos_totales || 0).toFixed(2)}</div>
+            </div>
+            <div class="kpi">
+              <div class="kpi-label">Promedio Semanal</div>
+              <div class="kpi-val">S/ ${Number(cm.promedio_semanal || 0).toFixed(2)}</div>
+            </div>
+            <div class="kpi">
+              <div class="kpi-label">Cortes Completados</div>
+              <div class="kpi-val">${Number(cm.citas_completadas ?? 0)}</div>
+            </div>
+            <div class="kpi">
+              <div class="kpi-label">Fiabilidad</div>
+              <div class="kpi-val">${Number(cm.tasa_fiabilidad ?? 100)}%</div>
+            </div>
+          </div>
+
+          <h3>Rendimiento por Trabajador (Barberos y Gerencia)</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Trabajador</th>
+                <th style="text-align:center">Completados</th>
+                <th style="text-align:center">Cancelados / Faltas</th>
+                <th style="text-align:right">Total Generado</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsBarberos || '<tr><td colspan="4" style="text-align:center">Sin registros detallados</td></tr>'}
+            </tbody>
+          </table>
+
+          <h3>Desglose por Servicio</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Servicio</th>
+                <th style="text-align:center">Cantidad</th>
+                <th style="text-align:right">Recaudado</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsServicios || '<tr><td colspan="3" style="text-align:center">Sin registros detallados</td></tr>'}
+            </tbody>
+          </table>
+
+          <div class="footer">
+            Documento oficial de control interno — Barbería Lucas (${safeMesAnio})
+          </div>
+          <script>
+            window.onload = () => { window.print(); };
+          <\/script>
+        </body>
+        </html>
+      `);
+      win.document.close();
+    });
+  });
+
+  // 11. ACCESO RÁPIDO A MI PERFIL DESDE EL HEADER
+  document.getElementById('header-profile-btn')?.addEventListener('click', () => {
+    activateSuperTab('tab-perfil');
+  });
+
+  // 12. CAMBIAR CONTRASEÑA DE SOPORTE
+  const myPassForm = document.getElementById('soporte-my-pass-form') as HTMLFormElement | null;
+  const smpFeedback = document.getElementById('smp-feedback');
+  const smpSubmitBtn = document.getElementById('smp-submit-btn') as HTMLButtonElement | null;
+
+  myPassForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const userId = myPassForm.getAttribute('data-my-user-id');
+    const p1 = (document.getElementById('smp-new-pass') as HTMLInputElement)?.value;
+    const p2 = (document.getElementById('smp-confirm-pass') as HTMLInputElement)?.value;
+
+    if (!smpFeedback) return;
+
+    if (!p1 || p1.length < 6) {
+      smpFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+      smpFeedback.textContent = 'La contraseña debe tener al menos 6 caracteres.';
+      smpFeedback.classList.remove('hidden');
+      return;
+    }
+
+    if (p1 !== p2) {
+      smpFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+      smpFeedback.textContent = 'Las contraseñas no coinciden. Por favor verifícalas.';
+      smpFeedback.classList.remove('hidden');
+      return;
+    }
+
+    if (smpSubmitBtn) {
+      smpSubmitBtn.disabled = true;
+      smpSubmitBtn.textContent = 'Actualizando contraseña...';
+    }
+
+    try {
+      const res = await fetch('/api/superadmin/staff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'reset_password', user_id: userId, nueva_password: p1 }),
+      });
+      const data = await res.json();
+      if (res.ok && data.exito) {
+        smpFeedback.className = 'rounded-xl border border-[#10B981]/40 bg-[#10B981]/10 px-3.5 py-2.5 text-xs text-[#10B981]';
+        smpFeedback.textContent = '¡Contraseña actualizada exitosamente! Usa tu nueva contraseña en tu próximo acceso.';
+        smpFeedback.classList.remove('hidden');
+        myPassForm.reset();
+      } else {
+        smpFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+        smpFeedback.textContent = data.error || 'Error al actualizar la contraseña.';
+        smpFeedback.classList.remove('hidden');
+      }
+    } catch (err) {
+      smpFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+      smpFeedback.textContent = 'Error de conexión con el servidor.';
+      smpFeedback.classList.remove('hidden');
+    } finally {
+      if (smpSubmitBtn) {
+        smpSubmitBtn.disabled = false;
+        smpSubmitBtn.textContent = 'Actualizar Mi Contraseña';
+      }
+    }
+  });
+
+  // 13. CAMBIAR NOMBRE VISIBLE DE SOPORTE
+  const myNameForm = document.getElementById('soporte-my-name-form') as HTMLFormElement | null;
+  const smnFeedback = document.getElementById('smn-feedback');
+  const smnSubmitBtn = document.getElementById('smn-submit-btn') as HTMLButtonElement | null;
+
+  myNameForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const userId = myNameForm.getAttribute('data-my-user-id');
+    const nuevoNombre = (document.getElementById('smn-name') as HTMLInputElement)?.value?.trim();
+
+    if (!smnFeedback) return;
+
+    if (!nuevoNombre || nuevoNombre.length < 2) {
+      smnFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+      smnFeedback.textContent = 'Por favor ingresa un nombre válido (al menos 2 caracteres).';
+      smnFeedback.classList.remove('hidden');
+      return;
+    }
+
+    if (smnSubmitBtn) {
+      smnSubmitBtn.disabled = true;
+      smnSubmitBtn.textContent = 'Guardando...';
+    }
+
+    try {
+      const res = await fetch('/api/superadmin/staff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accion: 'editar_nombre', user_id: userId, nuevo_nombre: nuevoNombre }),
+      });
+      const data = await res.json();
+      if (res.ok && data.exito) {
+        smnFeedback.className = 'rounded-xl border border-[#10B981]/40 bg-[#10B981]/10 px-3.5 py-2.5 text-xs text-[#10B981]';
+        smnFeedback.textContent = 'Nombre actualizado correctamente. Recargando...';
+        smnFeedback.classList.remove('hidden');
+        setTimeout(() => window.location.reload(), 900);
+      } else {
+        smnFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+        smnFeedback.textContent = data.error || 'Error al actualizar el nombre.';
+        smnFeedback.classList.remove('hidden');
+        if (smnSubmitBtn) {
+          smnSubmitBtn.disabled = false;
+          smnSubmitBtn.textContent = 'Guardar Nombre';
+        }
+      }
+    } catch (err) {
+      smnFeedback.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-3.5 py-2.5 text-xs text-[#EF4444]';
+      smnFeedback.textContent = 'Error de conexión con el servidor.';
+      smnFeedback.classList.remove('hidden');
+      if (smnSubmitBtn) {
+        smnSubmitBtn.disabled = false;
+        smnSubmitBtn.textContent = 'Guardar Nombre';
+      }
+    }
+  });
+</script>

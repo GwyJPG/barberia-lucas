@@ -1,0 +1,376 @@
+---
+export const prerender = false;
+import Layout from '../../layouts/Layout.astro';
+
+const { portal_slug } = Astro.params;
+const secretBarberSlug = import.meta.env.SECRET_BARBER_SLUG;
+const secretOwnerSlug = import.meta.env.SECRET_OWNER_SLUG;
+const secretSuperSlug = import.meta.env.SECRET_SUPERADMIN_SLUG;
+
+// Camuflaje 404 con nuestra página 404 personalizada
+if (
+  portal_slug !== secretSuperSlug &&
+  portal_slug !== secretOwnerSlug &&
+  portal_slug !== secretBarberSlug
+) {
+  return Astro.rewrite('/404');
+}
+
+const isSuper = portal_slug === secretSuperSlug;
+const isOwner = portal_slug === secretOwnerSlug;
+
+// Redirección si ya está autenticado con el rol correspondiente
+if (isSuper && Astro.locals.rol === 'superadmin') {
+  return Astro.redirect(`/${secretSuperSlug}`);
+}
+if (isOwner && ['owner', 'superadmin'].includes(Astro.locals.rol || '')) {
+  return Astro.redirect(`/${secretOwnerSlug}`);
+}
+if (!isSuper && !isOwner && ['barber', 'owner', 'superadmin'].includes(Astro.locals.rol || '')) {
+  return Astro.redirect(`/${secretBarberSlug}`);
+}
+
+const portalTitle = isSuper
+  ? 'Soporte'
+  : isOwner
+  ? 'Gerencia'
+  : 'Barbero';
+
+const portalBadge = isSuper ? 'SOPORTE' : isOwner ? 'GERENCIA' : 'BARBERO';
+const rolEsperado = isSuper ? 'superadmin' : isOwner ? 'owner' : 'barber';
+const emailPlaceholder = isSuper
+  ? 'soporte@barberialucas.com'
+  : isOwner
+  ? 'gerencia@barberialucas.com'
+  : 'staff@barberialucas.com';
+---
+
+<Layout title={`${portalTitle} | Acceso Privado`}>
+  <main class="login-viewport">
+    <div class="login-card">
+      <header class="card-header">
+        <div class="brand-crest">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+            <path d="M2 17l10 5 10-5"></path>
+            <path d="M2 12l10 5 10-5"></path>
+          </svg>
+        </div>
+        <span class="role-pill">{portalBadge}</span>
+        <h1 class="card-title">{portalTitle}</h1>
+        <p class="card-subtitle">Autenticación de sesión encriptada</p>
+      </header>
+
+      <form id="portal-login-form" class="login-form" novalidate>
+        <div id="login-alert" class="alert-banner" role="alert" style="display: none;"></div>
+
+        <div class="field-group">
+          <label for="email" class="field-label">Identificador de Usuario</label>
+          <input
+            type="email"
+            id="email"
+            name="email"
+            class="field-input"
+            placeholder={emailPlaceholder}
+            required
+            autocomplete="username"
+          />
+        </div>
+
+        <div class="field-group">
+          <label for="password" class="field-label">Clave de Seguridad</label>
+          <div class="password-input-wrap">
+            <input
+              type="password"
+              id="password"
+              name="password"
+              class="field-input field-input-pass"
+              placeholder="••••••••••••"
+              required
+              autocomplete="current-password"
+            />
+            <button
+              type="button"
+              id="toggle-pass-btn"
+              class="btn-eye"
+              aria-label="Mostrar u ocultar contraseña"
+              title="Ver contraseña"
+            >
+              <svg id="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+              <svg id="eye-closed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                <line x1="1" y1="1" x2="23" y2="23"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <button type="submit" id="login-btn" class="btn-primary">
+          <span class="btn-text">Iniciar Sesión</span>
+          <span class="btn-loader" style="display: none;">Verificando...</span>
+        </button>
+      </form>
+    </div>
+  </main>
+</Layout>
+
+<script define:vars={{ rolEsperado, portalSlug: portal_slug }}>
+  document.addEventListener('DOMContentLoaded', () => {
+    const form = document.getElementById('portal-login-form');
+    const alertBox = document.getElementById('login-alert');
+    const loginBtn = document.getElementById('login-btn');
+    const passInput = document.getElementById('password');
+    const togglePassBtn = document.getElementById('toggle-pass-btn');
+    const eyeOpen = document.getElementById('eye-open');
+    const eyeClosed = document.getElementById('eye-closed');
+
+    togglePassBtn?.addEventListener('click', () => {
+      if (!passInput) return;
+      const isPassword = passInput.type === 'password';
+      passInput.type = isPassword ? 'text' : 'password';
+      if (eyeOpen && eyeClosed) {
+        eyeOpen.style.display = isPassword ? 'none' : 'block';
+        eyeClosed.style.display = isPassword ? 'block' : 'none';
+      }
+    });
+
+    form?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      hideAlert();
+
+      const email = document.getElementById('email')?.value.trim();
+      const password = document.getElementById('password')?.value;
+
+      if (!email || !password) {
+        showAlert('Ingrese credenciales completas.', 'error');
+        return;
+      }
+
+      setLoading(true);
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email,
+            password,
+            rol_esperado: rolEsperado,
+          }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || !data.exito) {
+          showAlert(data.error || 'Credenciales no reconocidas.', 'error');
+          setLoading(false);
+          return;
+        }
+
+        // Redirección inmediata al panel correspondiente
+        window.location.href = `/${portalSlug}`;
+      } catch (err) {
+        showAlert('Error de comunicación con el servicio de autenticación.', 'error');
+        setLoading(false);
+      }
+    });
+
+    function showAlert(msg, type) {
+      if (!alertBox) return;
+      alertBox.textContent = msg;
+      alertBox.className = `alert-banner alert-${type}`;
+      alertBox.style.display = 'block';
+    }
+
+    function hideAlert() {
+      if (!alertBox) return;
+      alertBox.style.display = 'none';
+      alertBox.textContent = '';
+    }
+
+    function setLoading(isLoading) {
+      if (!loginBtn) return;
+      const textSpan = loginBtn.querySelector('.btn-text');
+      const loaderSpan = loginBtn.querySelector('.btn-loader');
+      loginBtn.disabled = isLoading;
+      if (isLoading) {
+        textSpan.style.display = 'none';
+        loaderSpan.style.display = 'inline';
+      } else {
+        textSpan.style.display = 'inline';
+        loaderSpan.style.display = 'none';
+      }
+    }
+  });
+</script>
+
+<style>
+  .login-viewport {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+    background-color: #0B0B0E;
+  }
+
+  .login-card {
+    width: 100%;
+    max-width: 400px;
+    background: #141419;
+    border: 1px solid #23232C;
+    border-radius: 16px;
+    padding: 2.25rem;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+  }
+
+  .card-header {
+    text-align: center;
+    margin-bottom: 2rem;
+  }
+
+  .brand-crest {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: #0B0B0E;
+    border: 1px solid #23232C;
+    color: #D4AF37;
+    margin-bottom: 0.85rem;
+  }
+
+  .role-pill {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    color: #D4AF37;
+    background: rgba(212, 175, 55, 0.12);
+    border: 1px solid rgba(212, 175, 55, 0.35);
+    padding: 0.25rem 0.65rem;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+  }
+
+  .card-title {
+    font-family: 'Cinzel', serif;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #F4F4F6;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+  }
+
+  .card-subtitle {
+    font-size: 0.8rem;
+    color: #9A9AA6;
+  }
+
+  .login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .field-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #9A9AA6;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .field-input {
+    width: 100%;
+    background: #0B0B0E;
+    border: 1px solid #23232C;
+    border-radius: 12px;
+    padding: 0.75rem 0.9rem;
+    color: #F4F4F6;
+    font-size: 0.9rem;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.2s ease;
+  }
+
+  .field-input:focus {
+    border-color: #D4AF37;
+  }
+
+  .password-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
+  .field-input-pass {
+    padding-right: 2.75rem;
+  }
+
+  .btn-eye {
+    position: absolute;
+    right: 0.65rem;
+    background: transparent;
+    border: none;
+    color: #9A9AA6;
+    cursor: pointer;
+    padding: 0.35rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.2s ease;
+  }
+
+  .btn-eye:hover {
+    color: #D4AF37;
+  }
+
+  .btn-primary {
+    background: #D4AF37;
+    color: #0B0B0E;
+    border: none;
+    border-radius: 12px;
+    padding: 0.85rem;
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    margin-top: 0.5rem;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: #DFBE54;
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .alert-banner {
+    padding: 0.75rem 0.9rem;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    line-height: 1.4;
+  }
+
+  .alert-error {
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #EF4444;
+  }
+</style>

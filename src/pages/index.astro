@@ -1,0 +1,882 @@
+---
+import Layout from '../layouts/Layout.astro';
+import BrandLogo from '../components/brand/BrandLogo.astro';
+import { supabaseAdmin } from '../lib/supabaseServer';
+
+// 1. Obtener Servicios Activos (Corte Básico S/10, Corte con Degradado S/12, Degradado con Diseño S/15)
+const { data: servicios } = await supabaseAdmin
+  .from('servicios')
+  .select('id, nombre, descripcion, precio, imagen_url')
+  .eq('activo', true)
+  .order('precio', { ascending: true });
+
+// 2. Obtener Personal que atiende cortes (Barberos + Soporte si atiende_cortes = true)
+const { data: barberosRaw } = await supabaseAdmin
+  .from('perfiles_staff')
+  .select('id, nombre_visible, rol, atiende_cortes')
+  .eq('activo', true)
+  .eq('atiende_cortes', true)
+  .order('created_at', { ascending: true });
+
+const barberos = barberosRaw || [];
+
+// 3. Obtener Configuración Global de Barbería Lucas
+const { data: configData } = await supabaseAdmin
+  .from('configuracion_barberia')
+  .select('nombre_barberia, whatsapp_clientes, dias_cooldown, bloques_lv, bloques_sd, intervalo_minutos, max_dias_reserva')
+  .eq('id', 1)
+  .maybeSingle();
+
+const config = {
+  nombre_comercial: configData?.nombre_barberia || 'Barbería Lucas',
+  whatsapp_clientes: configData?.whatsapp_clientes || '51999999999',
+  dias_cooldown: configData?.dias_cooldown ?? 14,
+  max_dias_reserva: configData?.max_dias_reserva ?? 8,
+  bloques_lv: configData?.bloques_lv || ['16:30', '17:40', '18:50', '20:00', '21:10'],
+  bloques_sd: configData?.bloques_sd || ['15:00', '16:10', '17:20', '19:00'],
+};
+
+// 4. Generar exactamente los 8 días permitidos (Hoy + 7 días) en zona horaria Lima (UTC-5)
+const nowLima = new Date(Date.now() - 5 * 60 * 60 * 1000);
+const diasNombres = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+const mesesNombres = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+
+interface DiaCard {
+  iso: string;
+  diaSemana: string;
+  numero: string;
+  mes: string;
+  etiqueta: string;
+  esFinDeSemana: boolean;
+}
+
+const diasDisponibles: DiaCard[] = [];
+for (let i = 0; i < config.max_dias_reserva; i++) {
+  const d = new Date(nowLima.getTime() + i * 24 * 60 * 60 * 1000);
+  const iso = d.toISOString().split('T')[0];
+  const dayOfWeek = d.getUTCDay();
+  const diaSemana = diasNombres[dayOfWeek];
+  const numero = String(d.getUTCDate()).padStart(2, '0');
+  const mes = mesesNombres[d.getUTCMonth()];
+  const etiqueta = i === 0 ? 'HOY' : i === 1 ? 'MAÑANA' : diaSemana.toUpperCase();
+  diasDisponibles.push({
+    iso,
+    diaSemana,
+    numero,
+    mes,
+    etiqueta,
+    esFinDeSemana: dayOfWeek === 0 || dayOfWeek === 6,
+  });
+}
+
+const todayLima = diasDisponibles[0]?.iso || '';
+---
+
+<Layout title={`${config.nombre_comercial} | Reservar Turno`}>
+  <!-- HEADER COMPACTO MOBILE-FIRST -->
+  <header class="sticky top-0 z-40 border-b border-[#23232C]/90 bg-[#0B0B0E]/95 backdrop-blur-xl">
+    <div class="mx-auto flex max-w-5xl items-center justify-between px-4 py-3.5 sm:px-6">
+      <a href="/" aria-label="Inicio Barbería Lucas" class="transition-opacity hover:opacity-90">
+        <BrandLogo size="sm" />
+      </a>
+
+      <div class="flex items-center gap-2.5">
+        <a
+          href={`https://wa.me/${config.whatsapp_clientes}?text=${encodeURIComponent('Hola Barbería Lucas, tengo una consulta sobre las reservas.')}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-1.5 rounded-lg border border-[#23232C] bg-[#141419] px-3 py-2 text-xs font-medium text-[#F4F4F6] transition-colors hover:border-[#D4AF37]/50 hover:text-[#D4AF37]"
+        >
+          <svg class="h-3.5 w-3.5 text-[#10B981]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+          </svg>
+          <span>WhatsApp</span>
+        </a>
+        <a
+          href="#reserva"
+          class="inline-flex items-center gap-1.5 rounded-lg bg-[#D4AF37] px-3.5 py-2 text-xs font-bold uppercase tracking-wider text-[#0B0B0E] shadow-md transition-transform hover:bg-[#e3be42] active:scale-95"
+        >
+          <span>Reservar</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10">
+    <!-- SECCIÓN 1: CATÁLOGO DE SERVICIOS CON DESCRIPCIÓN (SIN HERO, DIRECTO A LOS SERVICIOS) -->
+    <section id="servicios" class="mb-8 sm:mb-10">
+      <div class="mb-4 flex flex-col justify-between gap-2 sm:flex-row sm:items-end">
+        <div>
+          <span class="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#D4AF37]">
+            <span class="h-1.5 w-1.5 rounded-full bg-[#D4AF37]"></span>
+            Atención por Turno
+          </span>
+          <h1 class="mt-1 font-serif text-2xl font-bold tracking-tight text-[#F4F4F6] sm:text-3xl">
+            Nuestros Servicios
+          </h1>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 text-[11px] text-[#9A9AA6]">
+          <span class="rounded-md border border-[#23232C] bg-[#141419] px-2.5 py-1">
+            Lun–Vie: <strong class="text-[#F4F4F6]">4:30 PM – 10:00 PM</strong>
+          </span>
+          <span class="rounded-md border border-[#23232C] bg-[#141419] px-2.5 py-1">
+            Sáb–Dom: <strong class="text-[#F4F4F6]">3:00 PM – 7:00 PM</strong>
+          </span>
+        </div>
+      </div>
+
+      <!-- Tarjetas de los 3 Servicios CON Descripción -->
+      <div class="grid grid-cols-1 gap-3.5 sm:grid-cols-3">
+        {servicios && servicios.map((srv, idx) => (
+          <article
+            class="group relative flex flex-col justify-between rounded-xl border border-[#23232C] bg-[#141419]/90 p-4 transition-all hover:border-[#D4AF37]/50 sm:p-5"
+          >
+            <div>
+              <div class="mb-2.5 flex items-start justify-between gap-2">
+                <span class="inline-flex items-center rounded-md bg-[#D4AF37]/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#D4AF37]">
+                  {idx === 0 ? 'Clásico' : idx === 1 ? 'Más Pedido' : 'Especial'}
+                </span>
+                <span class="font-mono text-lg font-bold text-[#D4AF37] sm:text-xl">
+                  S/ {Number(srv.precio).toFixed(2)}
+                </span>
+              </div>
+              <h2 class="font-serif text-base font-bold text-[#F4F4F6] sm:text-lg">
+                {srv.nombre}
+              </h2>
+              <p class="mt-1.5 text-xs leading-relaxed text-[#9A9AA6]">
+                {srv.descripcion || 'Servicio profesional con acabado limpio y detallado.'}
+              </p>
+            </div>
+
+            <div class="mt-4 flex items-center justify-between border-t border-[#23232C]/70 pt-3">
+              <span class="text-[11px] text-[#9A9AA6]">Intervalo 1h 10m</span>
+              <button
+                type="button"
+                data-preselect-service={srv.id}
+                class="preselect-srv-btn inline-flex items-center gap-1 text-xs font-semibold text-[#D4AF37] transition-colors hover:text-[#F3E5AB]"
+              >
+                <span>Seleccionar</span>
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M5 12h14M12 5l7 7-7 7"/>
+                </svg>
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+
+    <!-- SECCIÓN 2: RESERVAR TURNO CON EFECTO 3D FLIP CARD -->
+    <section id="reserva" class="scroll-mt-20">
+      <div class="mb-4 flex items-center justify-between">
+        <div>
+          <h2 class="font-serif text-xl font-bold text-[#F4F4F6] sm:text-2xl">
+            Reservar Turno
+          </h2>
+          <p class="text-xs text-[#9A9AA6]">
+            Paso <span id="step-indicator-num" class="font-bold text-[#D4AF37]">1</span> de 2: <span id="step-indicator-text">Selecciona tu servicio, barbero y horario</span>
+          </p>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <span id="dot-step-1" class="h-2 w-6 rounded-full bg-[#D4AF37] transition-all"></span>
+          <span id="dot-step-2" class="h-2 w-2 rounded-full bg-[#23232C] transition-all"></span>
+        </div>
+      </div>
+
+      <!-- CONTENEDOR 3D FLIP -->
+      <div class="flip-scene relative w-full">
+        <div id="booking-flip-card" class="flip-card-inner relative w-full">
+
+          <!-- ============================================================ -->
+          <!-- CARA FRONTAL (PASO 1): SERVICIO + BARBERO + FECHA (8 DÍAS) + HORA -->
+          <!-- ============================================================ -->
+          <div id="flip-face-front" class="flip-face flip-front rounded-2xl border border-[#23232C] bg-[#141419] p-4 shadow-2xl sm:p-7">
+            <!-- 1. ESCOGE TU SERVICIO (SIN DESCRIPCIÓN: 2 BLOQUES ARRIBA + 1 BARRA DEBAJO EN PC Y MÓVIL) -->
+            <div class="mb-6">
+              <div class="mb-2.5 flex items-center justify-between">
+                <label class="text-xs font-bold uppercase tracking-wider text-[#F4F4F6]">
+                  1. Elige tu Servicio
+                </label>
+                <span class="text-[11px] text-[#9A9AA6]">Sin cargos adicionales</span>
+              </div>
+
+              <!-- Grid 2 columnas en Móvil y PC: los 2 primeros arriba (1 col c/u) y el 3ro abajo como barra completa (col-span-2) -->
+              <div class="grid grid-cols-2 gap-2.5 sm:gap-3" id="services-selector-grid">
+                {servicios && servicios.map((srv, index) => {
+                  const isThirdBar = index === 2 || (servicios.length % 2 === 1 && index === servicios.length - 1);
+                  return (
+                    <label
+                      class={`service-option-card group relative flex cursor-pointer select-none rounded-xl border border-[#23232C] bg-[#0B0B0E]/90 p-3.5 transition-all hover:border-[#D4AF37]/50 has-[:checked]:border-[#D4AF37] has-[:checked]:bg-[#D4AF37]/[0.1] has-[:checked]:shadow-[0_0_20px_rgba(212,175,55,0.14)] ${
+                        isThirdBar
+                          ? 'col-span-2 flex-row items-center justify-between px-4 py-3.5'
+                          : 'col-span-1 flex-col justify-between'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="servicio_id"
+                        value={srv.id}
+                        data-nombre={srv.nombre}
+                        data-precio={Number(srv.precio).toFixed(2)}
+                        class="sr-only"
+                        checked={index === 0}
+                      />
+
+                      <div class={isThirdBar ? 'flex items-center gap-2.5' : 'mb-2'}>
+                        <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[#9A9AA6]/50 group-has-[:checked]:border-[#D4AF37] group-has-[:checked]:bg-[#D4AF37]">
+                          <span class="h-1.5 w-1.5 rounded-full bg-[#0B0B0E] opacity-0 group-has-[:checked]:opacity-100"></span>
+                        </span>
+                        <span class={`font-serif font-bold text-[#F4F4F6] group-has-[:checked]:text-[#D4AF37] ${isThirdBar ? 'text-sm sm:text-base' : 'mt-1.5 block text-sm sm:text-base'}`}>
+                          {srv.nombre}
+                        </span>
+                      </div>
+
+                      <div class={isThirdBar ? 'flex items-center gap-2' : 'mt-auto pt-1'}>
+                        <span class="inline-block rounded-md border border-[#23232C] bg-[#141419] px-2.5 py-1 font-mono text-sm font-bold text-[#D4AF37] group-has-[:checked]:border-[#D4AF37]/40">
+                          S/ {Number(srv.precio).toFixed(2)}
+                        </span>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <!-- 2. ESCOGE TU BARBERO -->
+            <div class="mb-6">
+              <div class="mb-2.5 flex items-center justify-between">
+                <label class="text-xs font-bold uppercase tracking-wider text-[#F4F4F6]">
+                  2. Elige tu Barbero
+                </label>
+                <span class="text-[11px] text-[#9A9AA6]">{barberos.length} disponibles</span>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2.5 sm:grid-cols-3" id="barbers-selector-grid">
+                {barberos.map((barbero, idx) => (
+                  <label class="barber-option-card group relative flex cursor-pointer select-none items-center gap-2.5 rounded-xl border border-[#23232C] bg-[#0B0B0E]/90 p-3 transition-all hover:border-[#D4AF37]/50 has-[:checked]:border-[#D4AF37] has-[:checked]:bg-[#D4AF37]/[0.1]">
+                    <input
+                      type="radio"
+                      name="barbero_id"
+                      value={barbero.id}
+                      data-nombre={barbero.nombre_visible}
+                      class="sr-only"
+                      checked={idx === 0}
+                    />
+                    <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#23232C] bg-[#141419] font-serif text-xs font-bold text-[#D4AF37] group-has-[:checked]:border-[#D4AF37] group-has-[:checked]:bg-[#D4AF37] group-has-[:checked]:text-[#0B0B0E] sm:h-10 sm:w-10 sm:text-sm">
+                      {barbero.nombre_visible.split(' ').map((n: string) => n[0]).join('').slice(0, 2).toUpperCase()}
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate text-xs font-bold text-[#F4F4F6] group-has-[:checked]:text-[#D4AF37] sm:text-sm">
+                        {barbero.nombre_visible}
+                      </p>
+                      <p class="text-[10px] text-[#9A9AA6]">
+                        Barbero
+                      </p>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <!-- 3. ESCOGE LA FECHA (SELECTOR VISUAL DE 8 DÍAS: HOY + 7 DÍAS MÁX) -->
+            <div class="mb-6">
+              <div class="mb-2.5 flex items-center justify-between">
+                <label class="text-xs font-bold uppercase tracking-wider text-[#F4F4F6]">
+                  3. Elige el Día <span class="text-[#D4AF37]">(Rango máx. 8 días)</span>
+                </label>
+                <span id="selected-date-label" class="font-mono text-[11px] font-semibold text-[#D4AF37]">
+                  {todayLima}
+                </span>
+              </div>
+
+              <input type="hidden" id="fecha_cita_input" name="fecha_cita" value={todayLima} />
+
+              <!-- 8 tarjetas de día: 4 columnas en móvil (2 filas limpias) y 8 columnas en PC -->
+              <div class="grid grid-cols-4 gap-2 sm:grid-cols-8" id="date-cards-container">
+                {diasDisponibles.map((d, idx) => (
+                  <button
+                    type="button"
+                    data-date-iso={d.iso}
+                    data-date-pretty={`${d.diaSemana} ${d.numero} ${d.mes}`}
+                    class={`date-card-btn flex flex-col items-center justify-center rounded-xl border py-2.5 px-1.5 text-center transition-all select-none ${
+                      idx === 0
+                        ? 'border-[#D4AF37] bg-[#D4AF37]/15 text-[#F4F4F6] shadow-[0_0_15px_rgba(212,175,55,0.15)]'
+                        : 'border-[#23232C] bg-[#0B0B0E]/90 text-[#9A9AA6] hover:border-[#D4AF37]/40 hover:text-[#F4F4F6]'
+                    }`}
+                  >
+                    <span class={`text-[9px] font-bold uppercase tracking-wider ${idx === 0 ? 'text-[#D4AF37]' : 'text-[#9A9AA6]'}`}>
+                      {d.etiqueta}
+                    </span>
+                    <span class="mt-0.5 font-mono text-base font-bold leading-tight text-[#F4F4F6] sm:text-lg">
+                      {d.numero}
+                    </span>
+                    <span class="text-[10px] opacity-80">
+                      {d.mes}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <!-- 4. ESCOGE LA HORA (INTERVALOS DE 1H 10M) -->
+            <div class="mb-6">
+              <div class="mb-2.5 flex items-center justify-between">
+                <label class="text-xs font-bold uppercase tracking-wider text-[#F4F4F6]">
+                  4. Elige el Turno Disponible
+                </label>
+                <span id="schedule-type-badge" class="rounded border border-[#23232C] bg-[#0B0B0E] px-2 py-0.5 font-mono text-[10px] text-[#9A9AA6]">
+                  Cargando turnos...
+                </span>
+              </div>
+
+              <input type="hidden" id="bloque_horario_input" name="bloque_horario" value="" />
+
+              <div id="slots-grid-container" class="grid grid-cols-2 gap-2.5 sm:grid-cols-5">
+                <!-- Se llena dinámicamente con JS consultando /api/public/disponibilidad -->
+              </div>
+            </div>
+
+            <!-- ALERTA DE PASO 1 -->
+            <div id="step1-error-box" class="mb-4 hidden rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-4 py-3 text-xs text-[#EF4444]"></div>
+
+            <!-- BOTÓN PARA GIRAR LA TARJETA AL PASO 2 -->
+            <button
+              type="button"
+              id="btn-flip-to-back"
+              class="flex w-full items-center justify-center gap-2 rounded-xl bg-[#D4AF37] py-4 text-xs font-bold uppercase tracking-[0.15em] text-[#0B0B0E] shadow-lg transition-all hover:bg-[#e3be42] active:scale-[0.99]"
+            >
+              <span>Continuar con mis Datos</span>
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M5 12h14M12 5l7 7-7 7"/>
+              </svg>
+            </button>
+          </div>
+
+          <!-- ============================================================ -->
+          <!-- CARA TRASERA (PASO 2): DATOS DEL CLIENTE + MÉTODO DE PAGO + CONFIRMAR -->
+          <!-- ============================================================ -->
+          <div id="flip-face-back" class="flip-face flip-back hidden rounded-2xl border border-[#D4AF37]/40 bg-[#141419] p-4 shadow-2xl sm:p-7">
+            <!-- Cabecera con resumen del turno elegido y botón para regresar (girar de vuelta) -->
+            <div class="mb-6 flex flex-col justify-between gap-3 rounded-xl border border-[#23232C] bg-[#0B0B0E] p-3.5 sm:flex-row sm:items-center">
+              <div>
+                <span class="text-[10px] font-bold uppercase tracking-wider text-[#D4AF37]">
+                  Turno Seleccionado
+                </span>
+                <p id="summary-service-barber" class="mt-0.5 font-serif text-sm font-bold text-[#F4F4F6] sm:text-base">
+                  Corte Básico • S/ 10.00
+                </p>
+                <p id="summary-date-time" class="font-mono text-xs text-[#9A9AA6]">
+                  Fecha y Hora
+                </p>
+              </div>
+
+              <button
+                type="button"
+                id="btn-flip-to-front"
+                class="inline-flex items-center justify-center gap-1.5 self-start rounded-lg border border-[#23232C] bg-[#141419] px-3 py-2 text-xs font-semibold text-[#F4F4F6] transition-colors hover:border-[#D4AF37] hover:text-[#D4AF37] sm:self-center"
+              >
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M19 12H5M12 19l-7-7 7-7"/>
+                </svg>
+                <span>Cambiar Turno</span>
+              </button>
+            </div>
+
+            <form id="final-booking-form" class="space-y-4" novalidate>
+              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <!-- DNI (8 dígitos) -->
+                <div>
+                  <label for="cliente_dni" class="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-[#9A9AA6]">
+                    DNI del Cliente (8 dígitos) *
+                  </label>
+                  <input
+                    type="text"
+                    id="cliente_dni"
+                    name="cliente_dni"
+                    inputmode="numeric"
+                    maxlength="8"
+                    pattern="\d{8}"
+                    required
+                    placeholder="Ej: 74859612"
+                    class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-4 py-3 font-mono text-sm text-[#F4F4F6] placeholder-[#9A9AA6]/40 focus:border-[#D4AF37] focus:outline-none"
+                  />
+                </div>
+
+                <!-- Teléfono / WhatsApp -->
+                <div>
+                  <label for="cliente_telefono" class="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-[#9A9AA6]">
+                    Celular / WhatsApp *
+                  </label>
+                  <input
+                    type="tel"
+                    id="cliente_telefono"
+                    name="cliente_telefono"
+                    inputmode="tel"
+                    maxlength="15"
+                    required
+                    placeholder="Ej: 987654321"
+                    class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-4 py-3 font-mono text-sm text-[#F4F4F6] placeholder-[#9A9AA6]/40 focus:border-[#D4AF37] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <!-- Nombre Completo -->
+              <div>
+                <label for="cliente_nombre" class="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-[#9A9AA6]">
+                  Nombre y Apellido *
+                </label>
+                <input
+                  type="text"
+                  id="cliente_nombre"
+                  name="cliente_nombre"
+                  maxlength="80"
+                  required
+                  placeholder="Ej: Carlos Mendoza"
+                  class="w-full rounded-xl border border-[#23232C] bg-[#0B0B0E] px-4 py-3 text-sm text-[#F4F4F6] placeholder-[#9A9AA6]/40 focus:border-[#D4AF37] focus:outline-none"
+                />
+              </div>
+
+              <!-- 5. MÉTODO DE PAGO (SOLO EFECTIVO Y YAPE/PLIN) -->
+              <div class="pt-1">
+                <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-[#9A9AA6]">
+                  Método de Pago *
+                </label>
+                <div class="grid grid-cols-2 gap-3">
+                  <label class="group flex cursor-pointer flex-col items-center justify-center rounded-xl border border-[#23232C] bg-[#0B0B0E] p-3.5 text-center transition-all hover:border-[#D4AF37]/50 has-[:checked]:border-[#D4AF37] has-[:checked]:bg-[#D4AF37]/10">
+                    <input type="radio" name="metodo_pago" value="efectivo" class="sr-only" checked />
+                    <svg class="mb-1 h-5 w-5 text-[#9A9AA6] group-has-[:checked]:text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <rect x="2" y="6" width="20" height="12" rx="2"/>
+                      <circle cx="12" cy="12" r="2"/>
+                      <path d="M6 12h.01M18 12h.01"/>
+                    </svg>
+                    <span class="text-xs font-bold text-[#F4F4F6] group-has-[:checked]:text-[#D4AF37]">Efectivo</span>
+                  </label>
+
+                  <label class="group flex cursor-pointer flex-col items-center justify-center rounded-xl border border-[#23232C] bg-[#0B0B0E] p-3.5 text-center transition-all hover:border-[#D4AF37]/50 has-[:checked]:border-[#D4AF37] has-[:checked]:bg-[#D4AF37]/10">
+                    <input type="radio" name="metodo_pago" value="yape_plin" class="sr-only" />
+                    <svg class="mb-1 h-5 w-5 text-[#9A9AA6] group-has-[:checked]:text-[#D4AF37]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
+                      <line x1="12" y1="18" x2="12.01" y2="18"/>
+                    </svg>
+                    <span class="text-xs font-bold text-[#F4F4F6] group-has-[:checked]:text-[#D4AF37]">Yape / Plin</span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Nota de política de reserva de 14 días y reserva para otra persona -->
+              <div class="rounded-xl border border-[#D4AF37]/30 bg-[#0B0B0E]/80 p-3.5 text-xs leading-relaxed text-[#9A9AA6]">
+                <p>
+                  <strong class="text-[#D4AF37]">Importante:</strong> Recuerda que solo puedes reservar <strong class="text-[#F4F4F6]">cada {config.dias_cooldown} días</strong>.
+                </p>
+                <p class="mt-1">
+                  Si deseas reservar con tu nombre para otra persona (familiar o amigo), ten en cuenta que puedes <a href={`https://wa.me/${config.whatsapp_clientes}?text=${encodeURIComponent('Hola Barbería Lucas, deseo agendar un turno adicional para otra persona.')}`} target="_blank" rel="noopener noreferrer" class="font-bold text-[#D4AF37] underline">contactar directamente con el barbero por WhatsApp</a> para que te agende el turno.
+                </p>
+              </div>
+
+              <!-- Alerta de error o éxito -->
+              <div id="step2-feedback-box" class="hidden rounded-xl border px-4 py-3 text-xs"></div>
+
+              <!-- BOTÓN FINAL: CONFIRMAR Y AGENDAR TURNO -->
+              <button
+                type="submit"
+                id="btn-submit-booking"
+                class="flex w-full items-center justify-center gap-2 rounded-xl bg-[#D4AF37] py-4 text-xs font-bold uppercase tracking-[0.15em] text-[#0B0B0E] shadow-lg transition-all hover:bg-[#e3be42] active:scale-[0.99] disabled:opacity-50"
+              >
+                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <path d="M20 6L9 17l-5-5"/>
+                </svg>
+                <span id="btn-submit-text">Confirmar y Agendar Turno</span>
+              </button>
+            </form>
+          </div>
+
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- FOOTER CON HORARIOS Y POLÍTICA DE PRIVACIDAD -->
+  <footer class="mt-12 border-t border-[#23232C] bg-[#0B0B0E] py-8">
+    <div class="mx-auto flex max-w-5xl flex-col items-center justify-between gap-4 px-4 text-center sm:flex-row sm:px-6 sm:text-left">
+      <div>
+        <BrandLogo size="sm" />
+        <p class="mt-1.5 text-xs text-[#9A9AA6]">
+          Lun–Vie: 4:30 PM a 10:00 PM • Sáb–Dom: 3:00 PM a 7:00 PM
+        </p>
+      </div>
+      <div class="flex flex-wrap items-center justify-center gap-4 text-xs text-[#9A9AA6]">
+        <button type="button" id="open-privacy-btn" class="underline-offset-4 hover:text-[#D4AF37] hover:underline">
+          Política de Privacidad y Uso de Datos
+        </button>
+        <span>© {new Date().getFullYear()} {config.nombre_comercial}</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- MODAL DE POLÍTICA DE PRIVACIDAD (LEY N° 29733) -->
+  <div id="privacy-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+    <div class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-[#23232C] bg-[#141419] p-6 shadow-2xl">
+      <div class="mb-4 flex items-center justify-between border-b border-[#23232C] pb-3">
+        <h3 class="font-serif text-lg font-bold text-[#F4F4F6]">Política de Privacidad</h3>
+        <button type="button" id="close-privacy-btn" class="rounded-lg p-1.5 text-[#9A9AA6] hover:text-[#F4F4F6]" aria-label="Cerrar">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="space-y-3 text-xs leading-relaxed text-[#9A9AA6]">
+        <p>
+          En <strong class="text-[#F4F4F6]">{config.nombre_comercial}</strong> cumplimos con la Ley N° 29733 (Ley de Protección de Datos Personales del Perú).
+        </p>
+        <p>
+          <strong class="text-[#F4F4F6]">1. Datos recopilados:</strong> Únicamente solicitamos tu Nombre, DNI y número de Celular/WhatsApp con la finalidad exclusiva de gestionar tu turno y evitar reservas automatizadas o duplicadas.
+        </p>
+        <p>
+          <strong class="text-[#F4F4F6]">2. Frecuencia de reserva:</strong> El sistema registra tu DNI para aplicar el intervalo de {config.dias_cooldown} días entre reservas y mantener disponibilidad justa para todos nuestros clientes.
+        </p>
+        <p>
+          <strong class="text-[#F4F4F6]">3. Eliminación mensual:</strong> El historial operativo de citas se depura periódicamente y tus datos nunca son compartidos con terceros.
+        </p>
+      </div>
+    </div>
+  </div>
+</Layout>
+
+<style>
+  /* Animación de Giro 3D (Flip Card) */
+  .flip-scene {
+    perspective: 1400px;
+  }
+  .flip-card-inner {
+    transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+    transform-style: preserve-3d;
+  }
+  .flip-card-inner.is-flipped-anim {
+    animation: cardFlipPulse 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @keyframes cardFlipPulse {
+    0% {
+      transform: perspective(1400px) rotateY(0deg) scale(1);
+    }
+    45% {
+      transform: perspective(1400px) rotateY(90deg) scale(0.97);
+    }
+    100% {
+      transform: perspective(1400px) rotateY(0deg) scale(1);
+    }
+  }
+</style>
+
+<script define:vars={{ whatsappBarberia: config.whatsapp_clientes }}>
+  function format12h(hhmm) {
+    if (!hhmm || !hhmm.includes(':')) return hhmm;
+    const [hStr, mStr] = hhmm.split(':');
+    const h = parseInt(hStr, 10);
+    const suffix = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 || 12;
+    return `${h12}:${mStr} ${suffix}`;
+  }
+
+  const flipCard = document.getElementById('booking-flip-card');
+  const faceFront = document.getElementById('flip-face-front');
+  const faceBack = document.getElementById('flip-face-back');
+  const stepNum = document.getElementById('step-indicator-num');
+  const stepText = document.getElementById('step-indicator-text');
+  const dotStep1 = document.getElementById('dot-step-1');
+  const dotStep2 = document.getElementById('dot-step-2');
+
+  const fechaInput = document.getElementById('fecha_cita_input');
+  const bloqueInput = document.getElementById('bloque_horario_input');
+  const selectedDateLabel = document.getElementById('selected-date-label');
+  const scheduleTypeBadge = document.getElementById('schedule-type-badge');
+  const slotsContainer = document.getElementById('slots-grid-container');
+  const step1ErrorBox = document.getElementById('step1-error-box');
+
+  const summaryServiceBarber = document.getElementById('summary-service-barber');
+  const summaryDateTime = document.getElementById('summary-date-time');
+
+  let currentPrettyDate = 'Hoy';
+
+  document.querySelectorAll('.preselect-srv-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const srvId = btn.getAttribute('data-preselect-service');
+      const radio = document.querySelector(`input[name="servicio_id"][value="${srvId}"]`);
+      if (radio) {
+        radio.checked = true;
+      }
+      document.getElementById('reserva')?.scrollIntoView({ behavior: 'smooth' });
+    });
+  });
+
+  async function loadAvailableSlots() {
+    const selectedBarber = document.querySelector('input[name="barbero_id"]:checked');
+    const barberoId = selectedBarber ? selectedBarber.value : '';
+    const fecha = fechaInput ? fechaInput.value : '';
+
+    if (!barberoId || !fecha || !slotsContainer) return;
+
+    bloqueInput.value = '';
+    slotsContainer.innerHTML = `
+      <div class="col-span-2 sm:col-span-5 py-6 text-center text-xs text-[#9A9AA6]">
+        Consultando turnos disponibles...
+      </div>
+    `;
+
+    try {
+      const res = await fetch(`/api/public/disponibilidad?barbero_id=${encodeURIComponent(barberoId)}&fecha=${encodeURIComponent(fecha)}`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        slotsContainer.innerHTML = `<div class="col-span-2 sm:col-span-5 rounded-xl border border-[#EF4444]/30 bg-[#EF4444]/10 p-3 text-center text-xs text-[#EF4444]">${data.error || 'No se pudo cargar horarios'}</div>`;
+        return;
+      }
+
+      if (scheduleTypeBadge) {
+        scheduleTypeBadge.textContent = data.es_fin_de_semana
+          ? 'Sáb–Dom (3:00 PM – 7:00 PM)'
+          : 'Lun–Vie (4:30 PM – 10:00 PM)';
+      }
+
+      const detalle = data.detalle || [];
+      if (data.dia_bloqueado) {
+        slotsContainer.innerHTML = `
+          <div class="col-span-2 sm:col-span-5 rounded-xl border border-[#F59E0B]/30 bg-[#F59E0B]/10 p-4 text-center text-xs text-[#F59E0B]">
+            Este día se encuentra bloqueado por descanso. Por favor selecciona otro día de la lista.
+          </div>
+        `;
+        return;
+      }
+
+      slotsContainer.innerHTML = '';
+      let firstAvailablePicked = false;
+
+      detalle.forEach((slot) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        const prettyHora = format12h(slot.hora);
+
+        if (slot.disponible) {
+          const isSelected = !firstAvailablePicked;
+          if (isSelected) {
+            firstAvailablePicked = true;
+            bloqueInput.value = slot.hora;
+          }
+
+          btn.className = `slot-pill-btn flex flex-col items-center justify-center rounded-xl border py-3 px-2 transition-all select-none ${
+            isSelected
+              ? 'border-[#D4AF37] bg-[#D4AF37]/15 text-[#F4F4F6] shadow-[0_0_15px_rgba(212,175,55,0.15)]'
+              : 'border-[#23232C] bg-[#0B0B0E] text-[#F4F4F6] hover:border-[#D4AF37]/50'
+          }`;
+          btn.innerHTML = `
+            <span class="font-mono text-xs sm:text-sm font-bold">${prettyHora}</span>
+            <span class="mt-0.5 text-[10px] font-medium text-[#10B981]">Disponible</span>
+          `;
+
+          btn.addEventListener('click', () => {
+            document.querySelectorAll('.slot-pill-btn').forEach((b) => {
+              b.className = 'slot-pill-btn flex flex-col items-center justify-center rounded-xl border border-[#23232C] bg-[#0B0B0E] py-3 px-2 text-[#F4F4F6] transition-all hover:border-[#D4AF37]/50 select-none';
+            });
+            btn.className = 'slot-pill-btn flex flex-col items-center justify-center rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-3 px-2 text-[#F4F4F6] shadow-[0_0_15px_rgba(212,175,55,0.15)] transition-all select-none';
+            bloqueInput.value = slot.hora;
+            step1ErrorBox?.classList.add('hidden');
+          });
+        } else {
+          btn.disabled = true;
+          btn.className = 'flex flex-col items-center justify-center rounded-xl border border-[#23232C]/50 bg-[#0B0B0E]/40 py-3 px-2 opacity-45 cursor-not-allowed';
+          btn.innerHTML = `
+            <span class="font-mono text-xs sm:text-sm font-bold line-through text-[#9A9AA6]">${prettyHora}</span>
+            <span class="mt-0.5 text-[10px] text-[#EF4444]">${slot.motivo || 'Ocupado'}</span>
+          `;
+        }
+
+        slotsContainer.appendChild(btn);
+      });
+    } catch {
+      slotsContainer.innerHTML = `<div class="col-span-2 sm:col-span-5 text-center text-xs text-[#EF4444]">Error de conexión al consultar turnos.</div>`;
+    }
+  }
+
+  const dateButtons = document.querySelectorAll('.date-card-btn');
+  dateButtons.forEach((btn, idx) => {
+    if (idx === 0) {
+      currentPrettyDate = btn.getAttribute('data-date-pretty') || 'Hoy';
+    }
+    btn.addEventListener('click', () => {
+      dateButtons.forEach((b) => {
+        b.className = 'date-card-btn flex flex-col items-center justify-center rounded-xl border border-[#23232C] bg-[#0B0B0E]/90 py-2.5 px-1.5 text-center text-[#9A9AA6] transition-all hover:border-[#D4AF37]/40 hover:text-[#F4F4F6] select-none';
+      });
+      btn.className = 'date-card-btn flex flex-col items-center justify-center rounded-xl border border-[#D4AF37] bg-[#D4AF37]/15 py-2.5 px-1.5 text-center text-[#F4F4F6] shadow-[0_0_15px_rgba(212,175,55,0.15)] transition-all select-none';
+
+      const iso = btn.getAttribute('data-date-iso') || '';
+      currentPrettyDate = btn.getAttribute('data-date-pretty') || iso;
+      fechaInput.value = iso;
+      if (selectedDateLabel) selectedDateLabel.textContent = iso;
+      loadAvailableSlots();
+    });
+  });
+
+  document.querySelectorAll('input[name="barbero_id"]').forEach((radio) => {
+    radio.addEventListener('change', loadAvailableSlots);
+  });
+
+  // Giro 3D al Paso 2
+  document.getElementById('btn-flip-to-back')?.addEventListener('click', () => {
+    const srvRadio = document.querySelector('input[name="servicio_id"]:checked');
+    const barbRadio = document.querySelector('input[name="barbero_id"]:checked');
+    const fecha = fechaInput?.value;
+    const hora = bloqueInput?.value;
+
+    if (!srvRadio || !barbRadio || !fecha || !hora) {
+      if (step1ErrorBox) {
+        step1ErrorBox.textContent = 'Por favor selecciona un servicio, barbero, día y un turno disponible para continuar.';
+        step1ErrorBox.classList.remove('hidden');
+      }
+      return;
+    }
+
+    step1ErrorBox?.classList.add('hidden');
+
+    const srvNombre = srvRadio.getAttribute('data-nombre') || 'Servicio';
+    const srvPrecio = srvRadio.getAttribute('data-precio') || '0.00';
+    const barbNombre = barbRadio.getAttribute('data-nombre') || 'Barbero';
+
+    if (summaryServiceBarber) {
+      summaryServiceBarber.textContent = `${srvNombre} (S/ ${srvPrecio}) • con ${barbNombre}`;
+    }
+    if (summaryDateTime) {
+      summaryDateTime.textContent = `${currentPrettyDate} (${fecha}) a las ${format12h(hora)}`;
+    }
+
+    flipCard?.classList.add('is-flipped-anim');
+    setTimeout(() => {
+      faceFront?.classList.add('hidden');
+      faceBack?.classList.remove('hidden');
+      if (stepNum) stepNum.textContent = '2';
+      if (stepText) stepText.textContent = 'Completa tus datos y método de pago';
+      dotStep1?.classList.replace('w-6', 'w-2');
+      dotStep1?.classList.replace('bg-[#D4AF37]', 'bg-[#23232C]');
+      dotStep2?.classList.replace('w-2', 'w-6');
+      dotStep2?.classList.replace('bg-[#23232C]', 'bg-[#D4AF37]');
+    }, 240);
+    setTimeout(() => {
+      flipCard?.classList.remove('is-flipped-anim');
+    }, 560);
+  });
+
+  // Giro 3D de regreso al Paso 1
+  document.getElementById('btn-flip-to-front')?.addEventListener('click', () => {
+    flipCard?.classList.add('is-flipped-anim');
+    setTimeout(() => {
+      faceBack?.classList.add('hidden');
+      faceFront?.classList.remove('hidden');
+      if (stepNum) stepNum.textContent = '1';
+      if (stepText) stepText.textContent = 'Selecciona tu servicio, barbero y horario';
+      dotStep2?.classList.replace('w-6', 'w-2');
+      dotStep2?.classList.replace('bg-[#D4AF37]', 'bg-[#23232C]');
+      dotStep1?.classList.replace('w-2', 'w-6');
+      dotStep1?.classList.replace('bg-[#23232C]', 'bg-[#D4AF37]');
+    }, 240);
+    setTimeout(() => {
+      flipCard?.classList.remove('is-flipped-anim');
+    }, 560);
+  });
+
+  // Envío Final del Formulario de Reserva a /api/public/agendar
+  const finalForm = document.getElementById('final-booking-form');
+  const feedbackBox = document.getElementById('step2-feedback-box');
+  const submitBtn = document.getElementById('btn-submit-booking');
+  const submitText = document.getElementById('btn-submit-text');
+
+  finalForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!feedbackBox || !submitBtn || !submitText) return;
+
+    const srvRadio = document.querySelector('input[name="servicio_id"]:checked');
+    const barbRadio = document.querySelector('input[name="barbero_id"]:checked');
+    const pagoRadio = document.querySelector('input[name="metodo_pago"]:checked');
+
+    const dni = document.getElementById('cliente_dni')?.value.trim();
+    const telefono = document.getElementById('cliente_telefono')?.value.trim();
+    const nombre = document.getElementById('cliente_nombre')?.value.trim();
+    const fecha = fechaInput?.value;
+    const bloque_hora = bloqueInput?.value;
+    const metodo_pago = pagoRadio ? pagoRadio.value : 'efectivo';
+
+    if (!/^\d{8}$/.test(dni)) {
+      feedbackBox.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-4 py-3 text-xs text-[#EF4444]';
+      feedbackBox.textContent = 'Ingresa un DNI válido de 8 dígitos numéricos.';
+      feedbackBox.classList.remove('hidden');
+      return;
+    }
+
+    submitBtn.disabled = true;
+    submitText.textContent = 'Procesando Reserva...';
+    feedbackBox.classList.add('hidden');
+
+    try {
+      const res = await fetch('/api/public/agendar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          barbero_id: barbRadio?.value,
+          servicio_id: Number(srvRadio?.value),
+          nombre,
+          dni,
+          telefono,
+          fecha,
+          bloque_hora,
+          metodo_pago,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        feedbackBox.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-4 py-3 text-xs text-[#EF4444]';
+        feedbackBox.textContent = data.error || 'No se pudo completar la reserva.';
+        feedbackBox.classList.remove('hidden');
+        submitBtn.disabled = false;
+        submitText.textContent = 'Confirmar y Agendar Turno';
+        return;
+      }
+
+      const esc = (s) => String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c));
+      const srvNombre = srvRadio?.getAttribute('data-nombre') || 'Corte';
+      const barbNombre = barbRadio?.getAttribute('data-nombre') || 'Barbero';
+      const pagoLabel = metodo_pago === 'yape_plin' ? 'Yape / Plin' : 'Efectivo';
+      const waMsg = `Hola Barbería Lucas, acabo de reservar mi turno:\n• Cliente: ${nombre} (DNI: ${dni})\n• Servicio: ${srvNombre}\n• Barbero: ${barbNombre}\n• Fecha: ${fecha} a las ${format12h(bloque_hora)}\n• Pago: ${pagoLabel}`;
+
+      feedbackBox.className = 'rounded-xl border border-[#10B981]/40 bg-[#10B981]/10 p-4 text-xs text-[#10B981] space-y-2.5';
+      feedbackBox.innerHTML = `
+        <p class="font-bold text-sm">¡Turno reservado con éxito!</p>
+        <p class="text-[#F4F4F6]">${esc(data.mensaje || 'Tu cita ha sido registrada.')}</p>
+        <p class="rounded-lg border border-[#D4AF37]/30 bg-[#0B0B0E]/80 p-2.5 text-[11px] text-[#9A9AA6]">
+          <strong class="text-[#D4AF37]">Recuerda:</strong> Solo puedes reservar cada 14 días. En caso de que quieras reservar con tu nombre a otra persona, puedes contactar directamente con el barbero para que te agende el turno.
+        </p>
+        <a href="https://wa.me/${whatsappBarberia}?text=${encodeURIComponent(waMsg)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 rounded-lg bg-[#10B981] px-4 py-2.5 text-xs font-bold text-[#0B0B0E]">
+          <span>Contactar al Barbero / Enviar Constancia por WhatsApp</span>
+          <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </a>
+      `;
+      feedbackBox.classList.remove('hidden');
+      submitText.textContent = 'Turno Confirmado';
+      loadAvailableSlots();
+    } catch {
+      feedbackBox.className = 'rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 px-4 py-3 text-xs text-[#EF4444]';
+      feedbackBox.textContent = 'Error de red. Verifica tu conexión e inténtalo nuevamente.';
+      feedbackBox.classList.remove('hidden');
+      submitBtn.disabled = false;
+      submitText.textContent = 'Confirmar y Agendar Turno';
+    }
+  });
+
+  const privacyModal = document.getElementById('privacy-modal');
+  document.getElementById('open-privacy-btn')?.addEventListener('click', () => {
+    privacyModal?.classList.remove('hidden');
+    privacyModal?.classList.add('flex');
+  });
+  document.getElementById('close-privacy-btn')?.addEventListener('click', () => {
+    privacyModal?.classList.add('hidden');
+    privacyModal?.classList.remove('flex');
+  });
+
+  loadAvailableSlots();
+</script>
