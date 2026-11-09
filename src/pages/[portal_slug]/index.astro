@@ -5,17 +5,26 @@ import OwnerPanel from '../../components/panels/OwnerPanel.astro';
 import BarberPanel from '../../components/panels/BarberPanel.astro';
 
 const { portal_slug } = Astro.params;
-const secretBarberSlug = import.meta.env.SECRET_BARBER_SLUG;
-const secretOwnerSlug = import.meta.env.SECRET_OWNER_SLUG;
-const secretSuperSlug = import.meta.env.SECRET_SUPERADMIN_SLUG;
+const secretBarberSlug =
+  import.meta.env.SECRET_BARBER_SLUG ||
+  process.env.SECRET_BARBER_SLUG ||
+  'panel-barbero-b89';
+const secretOwnerSlug =
+  import.meta.env.SECRET_OWNER_SLUG ||
+  process.env.SECRET_OWNER_SLUG ||
+  'gerencia-owner-o72';
+const secretSuperSlug =
+  import.meta.env.SECRET_SUPERADMIN_SLUG ||
+  process.env.SECRET_SUPERADMIN_SLUG ||
+  'soporte-superadmin-s11';
 
-// Camuflaje 404 con nuestra página 404 personalizada
+// Camuflaje 404
 if (
   portal_slug !== secretSuperSlug &&
   portal_slug !== secretOwnerSlug &&
   portal_slug !== secretBarberSlug
 ) {
-  return Astro.rewrite('/404');
+  return Astro.redirect('/404');
 }
 
 const user = Astro.locals.user;

@@ -5,9 +5,18 @@ export const onRequest = defineMiddleware(async (context, next) => {
   const { url, cookies, redirect } = context;
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
 
-  const slugBarber = import.meta.env.SECRET_BARBER_SLUG;
-  const slugOwner = import.meta.env.SECRET_OWNER_SLUG;
-  const slugSuper = import.meta.env.SECRET_SUPERADMIN_SLUG;
+  const slugBarber =
+    import.meta.env.SECRET_BARBER_SLUG ||
+    process.env.SECRET_BARBER_SLUG ||
+    'panel-barbero-b89';
+  const slugOwner =
+    import.meta.env.SECRET_OWNER_SLUG ||
+    process.env.SECRET_OWNER_SLUG ||
+    'gerencia-owner-o72';
+  const slugSuper =
+    import.meta.env.SECRET_SUPERADMIN_SLUG ||
+    process.env.SECRET_SUPERADMIN_SLUG ||
+    'soporte-superadmin-s11';
 
   const esRutaBarber = slugBarber && (pathname === `/${slugBarber}` || pathname.startsWith(`/${slugBarber}/`));
   const esRutaOwner = slugOwner && (pathname === `/${slugOwner}` || pathname.startsWith(`/${slugOwner}/`));
