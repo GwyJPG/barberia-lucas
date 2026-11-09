@@ -5,8 +5,19 @@ import { checkRateLimit, getClientIp } from '../../../lib/rateLimit';
 
 export const prerender = false;
 
-const supabaseUrl = import.meta.env.SUPABASE_URL || import.meta.env.PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.SUPABASE_ANON_KEY || import.meta.env.PUBLIC_SUPABASE_ANON_KEY;
+const supabaseUrl =
+  import.meta.env.PUBLIC_SUPABASE_URL ||
+  import.meta.env.SUPABASE_URL ||
+  process.env.PUBLIC_SUPABASE_URL ||
+  process.env.SUPABASE_URL ||
+  'https://rigdkefyymdhjaakotrs.supabase.co';
+
+const supabaseAnonKey =
+  import.meta.env.PUBLIC_SUPABASE_ANON_KEY ||
+  import.meta.env.SUPABASE_ANON_KEY ||
+  process.env.PUBLIC_SUPABASE_ANON_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  '';
 
 export const POST: APIRoute = async ({ request, cookies }) => {
   const clientIp = getClientIp(request);
