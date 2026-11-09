@@ -125,6 +125,8 @@ ALTER TABLE citas ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bloqueos_agenda ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cierres_mensuales ENABLE ROW LEVEL SECURITY;
 ALTER TABLE configuracion_barberia ENABLE ROW LEVEL SECURITY;
+ALTER TABLE historial_clientes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE historial_clientes_barbero ENABLE ROW LEVEL SECURITY;
 
 -- Función auxiliar SECURITY DEFINER para evitar recursión infinita en RLS
 CREATE OR REPLACE FUNCTION obtener_rol_usuario()
